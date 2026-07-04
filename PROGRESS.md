@@ -9,7 +9,7 @@ Resume rule: read this file, find the first module NOT marked `[DONE]`, start th
 
 ## Modules
 
-- [ ] Module 0 — Global dark re-theme
+- [DONE] Module 0 — Global dark re-theme — 2026-07-04
 - [ ] Module 1 — Keyboard core + Confirm-on-Save + Command Palette
 - [ ] Module 2 — Customer & Supplier CRM depth
 - [ ] Module 3 — Opening Bills (OpeningBalances)
@@ -22,6 +22,23 @@ Resume rule: read this file, find the first module NOT marked `[DONE]`, start th
 - [ ] Module 10 — Admin & Roles
 - [ ] Module 11 — Reports completion, Charts, Export
 - [ ] Module 12 — Final QA pass
+
+## Module 0 detail
+Converted every screen (sidebar, mobile nav, Dashboard, New Sale, New Purchase, Sales/Purchase
+List, Items, Parties, Payments, Reports incl. all sub-reports, Settings, modals, toasts,
+autocomplete dropdown, badges) from the old light `ink`/`brand` custom Tailwind colors to the
+real `zinc`/`red` palette specified in the brief. Removed the custom `ink`/`brand` color
+definitions from `tailwind.config` entirely — using Tailwind's real built-in scales is more
+maintainable than keeping a same-named-but-repointed indirection.
+Found and fixed one real bug during verification: two raw `<input>` elements (Discount in New
+Sale, Other charges in New Purchase) didn't use the shared `inputCls` and so kept the browser's
+white default background even after the retheme — added explicit dark classes to both, plus a
+defensive global CSS rule (`input,select,textarea{background-color:...}`) so this class of bug
+can't silently recur on any future raw input.
+Verified visually in a real Chromium browser (Playwright) against the mock-mode app: Dashboard
+incl. low-stock alert, New Sale incl. keyboard-focus ring on a billing-grid cell, Item/Party/
+Payment modals, Purchase, Reports incl. Outstanding tab, Settings. Print view intentionally left
+light/white (untouched) since it's meant to be printed on paper.
 
 ## Notes
 - Testing method: mock mode only (localStorage mockServer, IS_GAS=false), verified by opening
