@@ -21,7 +21,7 @@ Resume rule: read this file, find the first module NOT marked `[DONE]`, start th
 - [DONE] Module 9 — Follow-up CRM — 2026-07-04
 - [DONE] Module 10 — Admin & Roles — 2026-07-04
 - [DONE] Module 11 — Reports completion, Charts, Export — 2026-07-04
-- [ ] Module 12 — Final QA pass
+- [DONE] Module 12 — Final QA pass — 2026-07-04
 
 ## Module 0 detail
 Converted every screen (sidebar, mobile nav, Dashboard, New Sale, New Purchase, Sales/Purchase
@@ -344,20 +344,38 @@ bucket matches the sum of the two unpaid invoices shown in the table beneath it;
 whole-database export from Settings now includes all ten completed entity sections (previously
 five), not just the ones that existed when that button was first built.
 
-## STATUS AS OF 2026-07-04 — resume from Module 12
+## Module 12 detail — Final QA pass
+Ran a set of whole-app consistency checks that only make sense once every module exists together,
+rather than re-verifying each module in isolation again:
+- **No debug leftovers:** grepped both files for `console.log`, `TODO`, `FIXME`, `debugger` — none
+  found.
+- **Syntax:** `node --check` on the full extracted app script and on `Code.gs` — both clean.
+- **Backend/mock parity:** every `apiXxx` function in `Code.gs` (32 total) has exactly one matching
+  `case "apiXxx"` in the mock server, and vice versa — no orphaned real endpoint the local preview
+  can't simulate, no mock case for an endpoint that doesn't exist server-side.
+- **Settings parity:** `DEFAULT_SETTINGS` (Code.gs) and `MOCK_DEFAULT_SETTINGS` (Index.html) have
+  the exact same key set — no setting silently missing its mock default.
+- **Action wiring:** every `actions.X(...)` call site in the frontend resolves to a defined action
+  — no dead references to a renamed/removed action.
+- **Sheet auto-provisioning:** confirmed `ensureDatabase_()` is fully generic (iterates
+  `Object.keys(SCHEMA)`), so all 20 sheets — including every one added in Modules 3–10 — get
+  created with correct headers automatically; nothing needed manual wiring that could've been
+  missed.
+- **Full click-through:** visited all 18 pages reachable from the sidebar (Dashboard through
+  Settings/Admin) in a fresh headless Chromium session with zero seed data, confirmed every one
+  renders with no console/page errors and a sensible empty state — this is the first time in the
+  whole build that literally every page was visited back-to-back in one session, which is exactly
+  where an interaction between two modules built on different days would show up if there were one.
+- **Fixed the one item on the "known nits" list from Module 6:** `PartyDetail`'s balance subtitle
+  now reads "Payable" for a Supplier with a negative balance instead of "Advance" (which only
+  makes sense for a Customer who's pre-paid) — one-line fix (`party.type === 'Supplier' ? 'Payable'
+  : 'Advance'`), verified both ways in a browser: a Supplier and a Customer each seeded with the
+  same negative opening balance now show the correct word for their side of the relationship.
 
-**Fully done, verified, committed:** Modules 0–11 (dark re-theme, keyboard core, CRM depth, opening
-balances, full Quotation→Sales Order→Invoice→Sales Return suite, dispatch tracking + cash/credit
-risk alert, full Purchase Suite with Purchase Return, Bulk Payment Entry, Category/Brand filters +
-Stock Ledger, Follow-up CRM, Admin & Roles, and now Reports charts/export completion). Each was
-checked by actually running the app in a headless Chromium browser against the mock server, not
-just read for correctness.
-
-**Not started: Module 12 — Final QA pass.** This is the last module: a full pass through the app
-checking for regressions across all 11 preceding modules together (not each in isolation), dead
-code/placeholders, consistent styling, and a final honest look at anything that slipped through.
-
-**To resume:** open a new session against this same branch/repo, tell Claude "read PROGRESS.md,
-resume from Module 12," and it does the final QA pass — then the whole 12-module build described
-in ONESHOT_PROMPT1.md is complete, and the suggestions-for-further-improvement the user originally
-asked for (at the very start of this session) should be delivered.
+## 🎉 BUILD COMPLETE — all 12 modules done, verified, committed
+Every module in ONESHOT_PROMPT1.md's spec has been built, tested in a real headless-Chromium
+browser against the mock server (not just read for correctness), and pushed to
+`claude/suggestions-improvements-2x8cz8`. The suggestions-for-further-improvement the user asked
+for at the very start of this session are the next and final deliverable — see the chat response
+for that session, not this file (this file tracks build progress, not the standing suggestions
+list, so it isn't duplicated here).

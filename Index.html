@@ -2313,7 +2313,11 @@ function PartyDetail({ db, derived, actions, go, S, partyId, tab: initTab }) {
     return /* @__PURE__ */ React.createElement("div", { className: "anim-in" }, /* @__PURE__ */ React.createElement(PageHead, { title: "Party not found", right: /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "sm", onClick: () => go("parties") }, "← Parties") }), /* @__PURE__ */ React.createElement(Empty, { icon: "\u{1F465}", msg: "This party no longer exists." }));
   }
   const bal = derived.partyBalance[party.id] || 0;
-  const balSub = Math.abs(bal) > 0.01 ? (bal > 0 ? "Due " : "Advance ") + fmt(Math.abs(bal), cur) : "Settled";
+  // A negative balance means we owe the party — for a Supplier that's a payable (money we
+  // still need to pay them), not an "advance" (which only makes sense the other way round,
+  // when a Customer has pre-paid us). Both share the same sign convention in partyBalance,
+  // just the human-facing word differs by which side of the relationship this party is on.
+  const balSub = Math.abs(bal) > 0.01 ? (bal > 0 ? "Due " : party.type === "Supplier" ? "Payable " : "Advance ") + fmt(Math.abs(bal), cur) : "Settled";
   return /* @__PURE__ */ React.createElement("div", { className: "anim-in" }, /* @__PURE__ */ React.createElement(PageHead, {
     title: party.name,
     sub: `${party.type || "Customer"}${party.phone ? " \xB7 " + party.phone : ""} \xB7 ${balSub}`,
