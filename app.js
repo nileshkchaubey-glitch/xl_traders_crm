@@ -1,0 +1,3021 @@
+
+const { useState, useEffect, useMemo, useRef, useCallback } = React;
+const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+const today = () => (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
+const n2 = (v) => Number(v || 0);
+const fmt = (v, cur = "\u20B9") => cur + n2(v).toLocaleString("en-IN", { maximumFractionDigits: 2 });
+const fq = (v) => n2(v).toLocaleString("en-IN", { maximumFractionDigits: 2 });
+const fdate = (d) => {
+  if (!d) return "\u2014";
+  const [y, m, dd] = String(d).slice(0, 10).split("-");
+  return `${dd}/${m}/${y}`;
+};
+const monthKey = (d) => String(d).slice(0, 7);
+const clamp = (s) => String(s || "").toLowerCase().trim();
+// India-first phone helpers: wa.me needs a country code, most numbers saved here
+// are local 10-digit mobiles, so default the missing code to 91 rather than
+// force every user to re-type "+91" on every contact.
+const waLink = (phone) => {
+  const digits = String(phone || "").replace(/\D/g, "");
+  if (!digits) return "";
+  const withCode = digits.length === 10 ? "91" + digits : digits;
+  return `https://wa.me/${withCode}`;
+};
+const telLink = (phone) => {
+  const digits = String(phone || "").replace(/\D/g, "");
+  return digits ? `tel:${digits}` : "";
+};
+const IS_GAS = typeof google !== "undefined" && google.script && google.script.run;
+function gs(fn, ...args) {
+  if (IS_GAS) {
+    return new Promise((resolve, reject) => {
+      google.script.run.withSuccessHandler((res) => resolve(typeof res === "string" ? JSON.parse(res) : res)).withFailureHandler((err) => reject(err))[fn](...args);
+    });
+  }
+  return mockServer(fn, args);
+}
+const MOCK_KEY = "xl_erp_mock_v1";
+// Local preview has no real Google login, so we stand in one fixed identity for
+// Session.getActiveUser().getEmail() — good enough to exercise the Owner/Staff gating
+// logic; the Settings page below adds a preview-only "view as" toggle purely so this can
+// be demoed/tested without needing a second Google account.
+const MOCK_CURRENT_EMAIL = "you@local.preview";
+function mockDB() {
+  const raw = localStorage.getItem(MOCK_KEY);
+  if (raw) {
+    try {
+      return JSON.parse(raw);
+    } catch (e) {
+    }
+  }
+  return {
+    settings: null, items: [], parties: [], partyContacts: [], invoices: [], invoiceItems: [],
+    purchases: [], purchaseItems: [], payments: [], openingBalances: [],
+    quotations: [], quotationItems: [], salesOrders: [], salesOrderItems: [], salesReturns: [], salesReturnItems: [],
+    dispatchLog: [],
+    purchaseReturns: [], purchaseReturnItems: [],
+    followups: [],
+    users: [],
+    counters: { INV: 0, PUR: 0, QUO: 0, SO: 0, SR: 0, PR: 0 }
+  };
+}
+function mockSave(db) {
+  localStorage.setItem(MOCK_KEY, JSON.stringify(db));
+}
+const MOCK_DEFAULT_SETTINGS = {
+  bizName: "XL TRADERS",
+  bizTagline: "Packaging \xB7 Catering \xB7 Cleaning \xB7 Decoration Supplies",
+  bizAddress: "44, Jay Ambey Nagar, Near Milan Point, Bamroli Road, Pandesara, Surat",
+  bizPhone: "77780 52990 / 97732 39442",
+  bizEmail: "xltraders990@gmail.com",
+  bizGstin: "",
+  invPrefix: "INV-",
+  purPrefix: "PB-",
+  quoPrefix: "QUO-",
+  soPrefix: "SO-",
+  srPrefix: "SR-",
+  prPrefix: "PR-",
+  taxEnabled: false,
+  taxPct: 18,
+  taxLabel: "GST",
+  currency: "\u20B9",
+  invoiceFooter: "Thank you for your business! Goods once sold will not be taken back.",
+  lowStockAlert: true,
+  units: ["Pcs", "Kg", "Box", "Pkt", "Dozen", "Roll", "Bundle", "Ltr"],
+  payModes: ["Cash", "UPI", "Credit", "Cheque", "Bank"]
+};
+async function mockServer(fn, args) {
+  await new Promise((r) => setTimeout(r, 60));
+  const db = mockDB();
+  const parse = (j) => JSON.parse(j);
+  const stockAdj = (deltas) => {
+    db.items.forEach((it) => {
+      if (deltas[it.id]) it.stock = n2(it.stock) + deltas[it.id];
+    });
+  };
+  switch (fn) {
+    case "bootstrap": {
+      if (!db.settings) {
+        db.settings = MOCK_DEFAULT_SETTINGS;
+        mockSave(db);
+      }
+      if (!db.partyContacts) db.partyContacts = [];
+      if (!db.openingBalances) db.openingBalances = [];
+      if (!db.quotations) db.quotations = [];
+      if (!db.quotationItems) db.quotationItems = [];
+      if (!db.salesOrders) db.salesOrders = [];
+      if (!db.salesOrderItems) db.salesOrderItems = [];
+      if (!db.salesReturns) db.salesReturns = [];
+      if (!db.salesReturnItems) db.salesReturnItems = [];
+      if (!db.dispatchLog) db.dispatchLog = [];
+      if (!db.purchaseReturns) db.purchaseReturns = [];
+      if (!db.purchaseReturnItems) db.purchaseReturnItems = [];
+      if (!db.followups) db.followups = [];
+      if (!db.users) db.users = [];
+      if (db.users.length === 0) {
+        db.users.push({ id: uid(), email: MOCK_CURRENT_EMAIL, name: "", role: "Owner", active: true });
+      }
+      if (!db.counters.PR) db.counters.PR = 0;
+      if (!db.counters.QUO) db.counters.QUO = 0;
+      if (!db.counters.SO) db.counters.SO = 0;
+      if (!db.counters.SR) db.counters.SR = 0;
+      mockSave(db);
+      const me = db.users.find((u) => u.email === MOCK_CURRENT_EMAIL && u.active !== false);
+      const currentUser = { email: MOCK_CURRENT_EMAIL, role: me ? me.role : "Staff" };
+      const { counters, ...rest } = db;
+      return { ...rest, settings: { ...MOCK_DEFAULT_SETTINGS, ...db.settings }, currentUser };
+    }
+    case "apiSaveInvoice": {
+      const p = parse(args[0]);
+      const inv = p.invoice;
+      const deltas = {};
+      const idx = db.invoices.findIndex((i) => i.id === inv.id);
+      if (idx >= 0) {
+        db.invoiceItems.filter((l) => l.invoiceId === inv.id).forEach((l) => {
+          if (l.itemId) deltas[l.itemId] = (deltas[l.itemId] || 0) + n2(l.qty);
+        });
+        db.invoiceItems = db.invoiceItems.filter((l) => l.invoiceId !== inv.id);
+      } else if (!inv.invNo) {
+        db.counters.INV += 1;
+        inv.invNo = (db.settings.invPrefix || "INV-") + db.counters.INV;
+        inv.createdAt = (/* @__PURE__ */ new Date()).toISOString();
+        inv.dispatchStatus = "Pending";
+        inv.dispatchedAt = "";
+      }
+      if (!inv.id) inv.id = uid();
+      if (idx >= 0) db.invoices[idx] = inv;
+      else db.invoices.push(inv);
+      p.items.forEach((l) => {
+        l.id = l.id || uid();
+        l.invoiceId = inv.id;
+        if (l.itemId) deltas[l.itemId] = (deltas[l.itemId] || 0) - n2(l.qty);
+        db.invoiceItems.push(l);
+      });
+      stockAdj(deltas);
+      // Only on create — matches the isEdit guard in apiSaveInvoice (Code.gs).
+      if (idx < 0 && p.payment && n2(p.payment.amount) > 0) db.payments.push({ id: uid(), date: inv.date, partyId: inv.partyId, partyName: inv.partyName, refType: "Sale", refId: inv.id, amount: n2(p.payment.amount), mode: p.payment.mode || "Cash", direction: "In", notes: "Received with invoice " + inv.invNo });
+      mockSave(db);
+      return { ok: true, invoice: inv, items: db.invoiceItems.filter((l) => l.invoiceId === inv.id) };
+    }
+    case "apiDeleteInvoice": {
+      const id = args[0];
+      const deltas = {};
+      db.invoiceItems.filter((l) => l.invoiceId === id).forEach((l) => {
+        if (l.itemId) deltas[l.itemId] = (deltas[l.itemId] || 0) + n2(l.qty);
+      });
+      stockAdj(deltas);
+      db.invoiceItems = db.invoiceItems.filter((l) => l.invoiceId !== id);
+      db.payments = db.payments.filter((pm) => pm.refId !== id);
+      db.invoices = db.invoices.filter((i) => i.id !== id);
+      mockSave(db);
+      return { ok: true };
+    }
+    case "apiSavePurchase": {
+      const p = parse(args[0]);
+      const pur = p.purchase;
+      const deltas = {};
+      const costMap = {};
+      const idx = db.purchases.findIndex((i) => i.id === pur.id);
+      if (idx >= 0) {
+        db.purchaseItems.filter((l) => l.purchaseId === pur.id).forEach((l) => {
+          if (l.itemId) deltas[l.itemId] = (deltas[l.itemId] || 0) - n2(l.qty);
+        });
+        db.purchaseItems = db.purchaseItems.filter((l) => l.purchaseId !== pur.id);
+      } else if (!pur.billNo) {
+        db.counters.PUR += 1;
+        pur.billNo = (db.settings.purPrefix || "PB-") + db.counters.PUR;
+        pur.createdAt = (/* @__PURE__ */ new Date()).toISOString();
+      }
+      if (!pur.id) pur.id = uid();
+      if (idx >= 0) db.purchases[idx] = pur;
+      else db.purchases.push(pur);
+      p.items.forEach((l) => {
+        l.id = l.id || uid();
+        l.purchaseId = pur.id;
+        if (l.itemId) {
+          deltas[l.itemId] = (deltas[l.itemId] || 0) + n2(l.qty);
+          costMap[l.itemId] = n2(l.rate);
+        }
+        db.purchaseItems.push(l);
+      });
+      stockAdj(deltas);
+      db.items.forEach((it) => {
+        if (costMap[it.id] > 0) it.purchaseRate = costMap[it.id];
+      });
+      // Only on create — matches the isEdit guard in apiSavePurchase (Code.gs).
+      if (idx < 0 && p.payment && n2(p.payment.amount) > 0) db.payments.push({ id: uid(), date: pur.date, partyId: pur.partyId, partyName: pur.partyName, refType: "Purchase", refId: pur.id, amount: n2(p.payment.amount), mode: p.payment.mode || "Cash", direction: "Out", notes: "Paid with bill " + pur.billNo });
+      mockSave(db);
+      return { ok: true, purchase: pur, items: db.purchaseItems.filter((l) => l.purchaseId === pur.id) };
+    }
+    case "apiDeletePurchase": {
+      const id = args[0];
+      const deltas = {};
+      db.purchaseItems.filter((l) => l.purchaseId === id).forEach((l) => {
+        if (l.itemId) deltas[l.itemId] = (deltas[l.itemId] || 0) - n2(l.qty);
+      });
+      stockAdj(deltas);
+      db.purchaseItems = db.purchaseItems.filter((l) => l.purchaseId !== id);
+      db.payments = db.payments.filter((pm) => pm.refId !== id);
+      db.purchases = db.purchases.filter((i) => i.id !== id);
+      mockSave(db);
+      return { ok: true };
+    }
+    case "apiSaveItem": {
+      const r = parse(args[0]);
+      if (!r.id) r.id = uid();
+      const i = db.items.findIndex((x) => x.id === r.id);
+      i >= 0 ? db.items[i] = r : db.items.push(r);
+      mockSave(db);
+      return { ok: true, record: r };
+    }
+    case "apiSaveParty": {
+      const r = parse(args[0]);
+      if (!r.id) r.id = uid();
+      const i = db.parties.findIndex((x) => x.id === r.id);
+      i >= 0 ? db.parties[i] = r : db.parties.push(r);
+      mockSave(db);
+      return { ok: true, record: r };
+    }
+    case "apiSaveContact": {
+      const r = parse(args[0]);
+      if (!r.id) r.id = uid();
+      const i = db.partyContacts.findIndex((x) => x.id === r.id);
+      i >= 0 ? db.partyContacts[i] = r : db.partyContacts.push(r);
+      mockSave(db);
+      return { ok: true, record: r };
+    }
+    case "apiDeleteContact":
+      db.partyContacts = db.partyContacts.filter((x) => x.id !== args[0]);
+      mockSave(db);
+      return { ok: true };
+    case "apiSaveOpeningBalance": {
+      const r = parse(args[0]);
+      if (!r.id) { r.id = uid(); r.createdAt = (/* @__PURE__ */ new Date()).toISOString(); }
+      const i = db.openingBalances.findIndex((x) => x.id === r.id);
+      i >= 0 ? db.openingBalances[i] = r : db.openingBalances.push(r);
+      mockSave(db);
+      return { ok: true, record: r };
+    }
+    case "apiDeleteOpeningBalance":
+      db.openingBalances = db.openingBalances.filter((x) => x.id !== args[0]);
+      mockSave(db);
+      return { ok: true };
+    case "apiSaveFollowup": {
+      const r = parse(args[0]);
+      if (!r.id) { r.id = uid(); r.createdAt = (/* @__PURE__ */ new Date()).toISOString(); }
+      const i = db.followups.findIndex((x) => x.id === r.id);
+      i >= 0 ? db.followups[i] = r : db.followups.push(r);
+      mockSave(db);
+      return { ok: true, record: r };
+    }
+    case "apiDeleteFollowup":
+      db.followups = db.followups.filter((x) => x.id !== args[0]);
+      mockSave(db);
+      return { ok: true };
+    case "apiSaveUser": {
+      const u = parse(args[0]);
+      if (u.id && (u.role !== "Owner" || u.active === false)) {
+        const others = db.users.filter((x) => x.id !== u.id && x.role === "Owner" && x.active !== false);
+        if (others.length === 0) throw new Error("At least one active Owner must remain.");
+      }
+      if (!u.id) u.id = uid();
+      const i = db.users.findIndex((x) => x.id === u.id);
+      i >= 0 ? db.users[i] = u : db.users.push(u);
+      mockSave(db);
+      return { ok: true, record: u };
+    }
+    case "apiDeleteUser": {
+      const id = args[0];
+      const others = db.users.filter((x) => x.id !== id && x.role === "Owner" && x.active !== false);
+      if (others.length === 0) throw new Error("At least one active Owner must remain.");
+      db.users = db.users.filter((x) => x.id !== id);
+      mockSave(db);
+      return { ok: true };
+    }
+    case "apiMarkConverted": {
+      const p = parse(args[0]);
+      const list = p.sheet === "Quotations" ? db.quotations : db.salesOrders;
+      const row = list.find((x) => x.id === p.id);
+      if (row) row.status = "Converted";
+      mockSave(db);
+      return { ok: true };
+    }
+    case "apiSaveQuotation": {
+      const p = parse(args[0]);
+      const quo = p.quotation;
+      const idx = db.quotations.findIndex((x) => x.id === quo.id);
+      if (idx >= 0) {
+        db.quotationItems = db.quotationItems.filter((l) => l.quotationId !== quo.id);
+      } else if (!quo.quoNo) {
+        db.counters.QUO += 1;
+        quo.quoNo = (db.settings.quoPrefix || "QUO-") + db.counters.QUO;
+        quo.createdAt = (/* @__PURE__ */ new Date()).toISOString();
+        quo.status = quo.status || "Open";
+      }
+      if (!quo.id) quo.id = uid();
+      idx >= 0 ? db.quotations[idx] = quo : db.quotations.push(quo);
+      p.items.forEach((l) => {
+        l.id = l.id || uid();
+        l.quotationId = quo.id;
+        db.quotationItems.push(l);
+      });
+      mockSave(db);
+      return { ok: true, quotation: quo, items: db.quotationItems.filter((l) => l.quotationId === quo.id) };
+    }
+    case "apiDeleteQuotation": {
+      const id = args[0];
+      db.quotationItems = db.quotationItems.filter((l) => l.quotationId !== id);
+      db.quotations = db.quotations.filter((x) => x.id !== id);
+      mockSave(db);
+      return { ok: true };
+    }
+    case "apiSaveSalesOrder": {
+      const p = parse(args[0]);
+      const so = p.salesOrder;
+      const idx = db.salesOrders.findIndex((x) => x.id === so.id);
+      if (idx >= 0) {
+        db.salesOrderItems = db.salesOrderItems.filter((l) => l.salesOrderId !== so.id);
+      } else if (!so.soNo) {
+        db.counters.SO += 1;
+        so.soNo = (db.settings.soPrefix || "SO-") + db.counters.SO;
+        so.createdAt = (/* @__PURE__ */ new Date()).toISOString();
+        so.status = so.status || "Open";
+      }
+      if (!so.id) so.id = uid();
+      idx >= 0 ? db.salesOrders[idx] = so : db.salesOrders.push(so);
+      p.items.forEach((l) => {
+        l.id = l.id || uid();
+        l.salesOrderId = so.id;
+        db.salesOrderItems.push(l);
+      });
+      mockSave(db);
+      return { ok: true, salesOrder: so, items: db.salesOrderItems.filter((l) => l.salesOrderId === so.id) };
+    }
+    case "apiDeleteSalesOrder": {
+      const id = args[0];
+      db.salesOrderItems = db.salesOrderItems.filter((l) => l.salesOrderId !== id);
+      db.salesOrders = db.salesOrders.filter((x) => x.id !== id);
+      mockSave(db);
+      return { ok: true };
+    }
+    case "apiSaveSalesReturn": {
+      const p = parse(args[0]);
+      const sr = p.salesReturn;
+      const isEdit = db.salesReturns.some((x) => x.id === sr.id);
+      const deltas = {};
+      if (!sr.id) {
+        sr.id = uid();
+        db.counters.SR += 1;
+        sr.srNo = (db.settings.srPrefix || "SR-") + db.counters.SR;
+        sr.createdAt = (/* @__PURE__ */ new Date()).toISOString();
+        sr.status = "Completed";
+      }
+      const idx = db.salesReturns.findIndex((x) => x.id === sr.id);
+      idx >= 0 ? db.salesReturns[idx] = sr : db.salesReturns.push(sr);
+      // Replace, not append: re-saving an existing return must undo its old stock-back-IN
+      // delta before applying the new one, matching apiSaveSalesReturn in Code.gs.
+      if (isEdit) {
+        db.salesReturnItems.filter((l) => l.salesReturnId === sr.id).forEach((l) => {
+          if (l.itemId) deltas[l.itemId] = (deltas[l.itemId] || 0) - n2(l.qty);
+        });
+        db.salesReturnItems = db.salesReturnItems.filter((l) => l.salesReturnId !== sr.id);
+      }
+      p.items.forEach((l) => {
+        l.id = l.id || uid();
+        l.salesReturnId = sr.id;
+        if (l.itemId) deltas[l.itemId] = (deltas[l.itemId] || 0) + n2(l.qty);
+        db.salesReturnItems.push(l);
+      });
+      stockAdj(deltas);
+      if (n2(sr.total) > 0 && sr.sourceId) {
+        const pIdx = db.payments.findIndex((x) => x.id === sr.id);
+        const paymentRow = { id: sr.id, date: sr.date, partyId: sr.partyId, partyName: sr.partyName, refType: "SalesReturn", refId: sr.sourceId, amount: n2(sr.total), mode: sr.srNo, direction: "In", notes: "Goods returned, return " + sr.srNo };
+        pIdx >= 0 ? db.payments[pIdx] = paymentRow : db.payments.push(paymentRow);
+      }
+      mockSave(db);
+      return { ok: true, salesReturn: sr, items: db.salesReturnItems.filter((l) => l.salesReturnId === sr.id) };
+    }
+    case "apiDeleteSalesReturn": {
+      const id = args[0];
+      const deltas = {};
+      db.salesReturnItems.filter((l) => l.salesReturnId === id).forEach((l) => {
+        if (l.itemId) deltas[l.itemId] = (deltas[l.itemId] || 0) - n2(l.qty);
+      });
+      stockAdj(deltas);
+      db.salesReturnItems = db.salesReturnItems.filter((l) => l.salesReturnId !== id);
+      db.payments = db.payments.filter((x) => x.id !== id);
+      db.salesReturns = db.salesReturns.filter((x) => x.id !== id);
+      mockSave(db);
+      return { ok: true };
+    }
+    case "apiMarkDispatch": {
+      const p = parse(args[0]);
+      const inv = db.invoices.find((x) => x.id === p.invoiceId);
+      if (!inv) throw new Error("Invoice not found");
+      const dispatched = p.action === "Dispatched";
+      inv.dispatchStatus = dispatched ? "Dispatched" : "Pending";
+      inv.dispatchedAt = dispatched ? (/* @__PURE__ */ new Date()).toISOString() : "";
+      db.dispatchLog.push({ id: uid(), invoiceId: p.invoiceId, invNo: inv.invNo, partyName: inv.partyName, action: p.action, vehicleNo: p.vehicleNo || "", transporter: p.transporter || "", notes: p.notes || "", timestamp: (/* @__PURE__ */ new Date()).toISOString(), userEmail: "local-preview@example.com" });
+      mockSave(db);
+      return { ok: true, dispatchStatus: inv.dispatchStatus, dispatchedAt: inv.dispatchedAt };
+    }
+    case "apiSavePurchaseReturn": {
+      const p = parse(args[0]);
+      const pr = p.purchaseReturn;
+      const isEdit = db.purchaseReturns.some((x) => x.id === pr.id);
+      const deltas = {};
+      if (!pr.id) {
+        pr.id = uid();
+        db.counters.PR += 1;
+        pr.prNo = (db.settings.prPrefix || "PR-") + db.counters.PR;
+        pr.createdAt = (/* @__PURE__ */ new Date()).toISOString();
+        pr.status = "Completed";
+      }
+      const idx = db.purchaseReturns.findIndex((x) => x.id === pr.id);
+      idx >= 0 ? db.purchaseReturns[idx] = pr : db.purchaseReturns.push(pr);
+      // Replace, not append: re-saving an existing return must undo its old stock-OUT
+      // delta before applying the new one, matching apiSavePurchaseReturn in Code.gs.
+      if (isEdit) {
+        db.purchaseReturnItems.filter((l) => l.purchaseReturnId === pr.id).forEach((l) => {
+          if (l.itemId) deltas[l.itemId] = (deltas[l.itemId] || 0) + n2(l.qty);
+        });
+        db.purchaseReturnItems = db.purchaseReturnItems.filter((l) => l.purchaseReturnId !== pr.id);
+      }
+      p.items.forEach((l) => {
+        l.id = l.id || uid();
+        l.purchaseReturnId = pr.id;
+        if (l.itemId) deltas[l.itemId] = (deltas[l.itemId] || 0) - n2(l.qty);
+        db.purchaseReturnItems.push(l);
+      });
+      stockAdj(deltas);
+      if (n2(pr.total) > 0 && pr.sourceId) {
+        const pIdx = db.payments.findIndex((x) => x.id === pr.id);
+        const paymentRow = { id: pr.id, date: pr.date, partyId: pr.partyId, partyName: pr.partyName, refType: "PurchaseReturn", refId: pr.sourceId, amount: n2(pr.total), mode: pr.prNo, direction: "Out", notes: "Goods returned to supplier, return " + pr.prNo };
+        pIdx >= 0 ? db.payments[pIdx] = paymentRow : db.payments.push(paymentRow);
+      }
+      mockSave(db);
+      return { ok: true, purchaseReturn: pr, items: db.purchaseReturnItems.filter((l) => l.purchaseReturnId === pr.id) };
+    }
+    case "apiDeletePurchaseReturn": {
+      const id = args[0];
+      const deltas = {};
+      db.purchaseReturnItems.filter((l) => l.purchaseReturnId === id).forEach((l) => {
+        if (l.itemId) deltas[l.itemId] = (deltas[l.itemId] || 0) + n2(l.qty);
+      });
+      stockAdj(deltas);
+      db.purchaseReturnItems = db.purchaseReturnItems.filter((l) => l.purchaseReturnId !== id);
+      db.payments = db.payments.filter((x) => x.id !== id);
+      db.purchaseReturns = db.purchaseReturns.filter((x) => x.id !== id);
+      mockSave(db);
+      return { ok: true };
+    }
+    case "apiUploadVisitingCard": {
+      const p = parse(args[0]);
+      // No real Drive in local preview — a data: URL stands in so the
+      // Documents tab still shows a working image immediately.
+      return { ok: true, url: `data:${p.mimeType};base64,${p.base64}` };
+    }
+    case "apiSavePayment": {
+      const r = parse(args[0]);
+      if (!r.id) r.id = uid();
+      const i = db.payments.findIndex((x) => x.id === r.id);
+      i >= 0 ? db.payments[i] = r : db.payments.push(r);
+      mockSave(db);
+      return { ok: true, record: r };
+    }
+    case "apiSaveBulkPayment": {
+      const p = parse(args[0]);
+      const records = (p.allocations || []).filter((a) => n2(a.amount) > 0).map((a) => ({ id: uid(), date: p.date, partyId: p.partyId, partyName: p.partyName, refType: a.refType, refId: a.refId, amount: n2(a.amount), mode: p.mode, direction: p.direction, notes: p.notes || "" }));
+      if (n2(p.onAccountAmount) > 0) {
+        records.push({ id: uid(), date: p.date, partyId: p.partyId, partyName: p.partyName, refType: "OnAccount", refId: "", amount: n2(p.onAccountAmount), mode: p.mode, direction: p.direction, notes: p.notes || "" });
+      }
+      db.payments.push(...records);
+      mockSave(db);
+      return { ok: true, records };
+    }
+    case "apiDeleteItem":
+      db.items = db.items.filter((x) => x.id !== args[0]);
+      mockSave(db);
+      return { ok: true };
+    case "apiDeleteParty":
+      db.parties = db.parties.filter((x) => x.id !== args[0]);
+      db.partyContacts = db.partyContacts.filter((x) => x.partyId !== args[0]);
+      mockSave(db);
+      return { ok: true };
+    case "apiDeletePayment":
+      db.payments = db.payments.filter((x) => x.id !== args[0]);
+      mockSave(db);
+      return { ok: true };
+    case "apiSaveSettings":
+      db.settings = parse(args[0]);
+      mockSave(db);
+      return { ok: true };
+    case "apiHtmlToPdf":
+      // No real GAS PDF converter in local preview — caller falls back to window.print().
+      return { ok: true, base64: null };
+    default:
+      throw new Error("Unknown mock fn: " + fn);
+  }
+}
+let pushToast = () => {
+};
+function ToastHost() {
+  const [toasts, setToasts] = useState([]);
+  useEffect(() => {
+    pushToast = (msg, type = "ok") => {
+      const id = uid();
+      setToasts((t) => [...t, { id, msg, type }]);
+      setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 3e3);
+    };
+  }, []);
+  return /* @__PURE__ */ React.createElement("div", { className: "fixed bottom-20 md:bottom-6 left-1/2 -translate-x-1/2 z-[999] flex flex-col gap-2 items-center" }, toasts.map((t) => /* @__PURE__ */ React.createElement("div", { key: t.id, className: `anim-in px-4 py-2.5 rounded-xl shadow-lg text-sm font-medium text-white border ${t.type === "err" ? "bg-red-600 border-red-500" : t.type === "warn" ? "bg-amber-600 border-amber-500" : "bg-zinc-800 border-zinc-700"}` }, t.msg)));
+}
+const toast = (msg, type) => pushToast(msg, type);
+function Modal({ title, onClose, children, wide }) {
+  useEffect(() => {
+    const h = (e) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, [onClose]);
+  return /* @__PURE__ */ React.createElement("div", { className: "fixed inset-0 z-[500] bg-black/70 flex items-end md:items-center justify-center p-0 md:p-6", onMouseDown: (e) => {
+    if (e.target === e.currentTarget) onClose();
+  } }, /* @__PURE__ */ React.createElement("div", { className: `anim-in bg-zinc-900 border border-zinc-800 w-full ${wide ? "md:max-w-3xl" : "md:max-w-lg"} max-h-[92vh] overflow-y-auto rounded-t-2xl md:rounded-2xl shadow-2xl` }, /* @__PURE__ */ React.createElement("div", { className: "sticky top-0 bg-zinc-900 border-b border-zinc-800 px-5 py-3.5 flex items-center justify-between z-10" }, /* @__PURE__ */ React.createElement("h3", { className: "font-bold text-zinc-100" }, title), /* @__PURE__ */ React.createElement("button", { onClick: onClose, className: "w-8 h-8 rounded-lg hover:bg-zinc-800 text-zinc-400 text-lg leading-none" }, "\u2715")), /* @__PURE__ */ React.createElement("div", { className: "p-5" }, children)));
+}
+function Confirm({ msg, onYes, onClose }) {
+  return /* @__PURE__ */ React.createElement(Modal, { title: "Confirm", onClose }, /* @__PURE__ */ React.createElement("p", { className: "text-sm text-zinc-300 mb-5" }, msg), /* @__PURE__ */ React.createElement("div", { className: "flex gap-2 justify-end" }, /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", onClick: onClose }, "Cancel"), /* @__PURE__ */ React.createElement(Btn, { kind: "danger", onClick: () => {
+    onYes();
+    onClose();
+  } }, "Delete")));
+}
+function Btn({ kind = "primary", size = "md", className = "", children, ...props }) {
+  const kinds = {
+    primary: "bg-zinc-100 text-zinc-900 hover:bg-zinc-900",
+    brand: "bg-red-600 text-white hover:bg-red-500",
+    ghost: "bg-zinc-900 border border-zinc-700 text-zinc-200 hover:bg-zinc-800",
+    danger: "bg-red-600 text-white hover:bg-red-500",
+    soft: "bg-zinc-800 text-zinc-200 hover:bg-zinc-700"
+  };
+  const sizes = { md: "px-4 py-2 text-sm", sm: "px-3 py-1.5 text-xs", xs: "px-2 py-1 text-xs" };
+  return /* @__PURE__ */ React.createElement("button", { ...props, className: `inline-flex items-center justify-center gap-1.5 rounded-lg font-semibold transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${kinds[kind]} ${sizes[size]} ${className}` }, children);
+}
+function Field({ label, children, hint }) {
+  return /* @__PURE__ */ React.createElement("label", { className: "block" }, /* @__PURE__ */ React.createElement("span", { className: "block text-xs font-semibold text-zinc-400 mb-1" }, label), children, hint && /* @__PURE__ */ React.createElement("span", { className: "block text-[11px] text-zinc-500 mt-0.5" }, hint));
+}
+const inputCls = "w-full px-3 py-2 text-sm bg-zinc-800 border border-zinc-700 text-zinc-100 rounded-lg focus:border-red-500 focus:ring-2 focus:ring-red-500/30 transition placeholder:text-zinc-500";
+const Input = (props) => /* @__PURE__ */ React.createElement("input", { ...props, className: `${inputCls} ${props.className || ""}` });
+const Select = (props) => /* @__PURE__ */ React.createElement("select", { ...props, className: `${inputCls} ${props.className || ""}` }, props.children);
+function StatCard({ label, value, sub, tone = "ink" }) {
+  const tones = { ink: "text-zinc-100", green: "text-emerald-400", red: "text-red-400", blue: "text-blue-400", amber: "text-amber-400" };
+  return /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800 p-4" }, /* @__PURE__ */ React.createElement("div", { className: "text-[11px] font-semibold uppercase tracking-wide text-zinc-500" }, label), /* @__PURE__ */ React.createElement("div", { className: `text-xl font-bold num mt-1 ${tones[tone]}` }, value), sub && /* @__PURE__ */ React.createElement("div", { className: "text-[11px] text-zinc-500 mt-0.5" }, sub));
+}
+/**
+ * Minimal horizontal bar chart (Module 11) — plain divs sized by percentage-of-max width,
+ * not SVG/canvas or a charting library. Production already depends on one CDN fetch for
+ * Tailwind that can fail (see __cdnFail); adding a charting library would be a second one,
+ * for a handful of report bars that a dozen flex divs render identically and can't fail
+ * to load. Negative values (e.g. a loss-making item) render as a red bar sized off its
+ * absolute value, same visual language as the loss coloring already used in report tables.
+ */
+function BarChart({ data, cur, fmtValue }) {
+  const max = Math.max(1, ...data.map((d) => Math.abs(d.value)));
+  const format = fmtValue || ((v) => fmt(v, cur));
+  return /* @__PURE__ */ React.createElement("div", { className: "space-y-2" }, data.map((d, i) => /* @__PURE__ */ React.createElement("div", { key: i }, /* @__PURE__ */ React.createElement("div", { className: "flex justify-between text-xs mb-0.5" }, /* @__PURE__ */ React.createElement("span", { className: "text-zinc-400 truncate max-w-[60%]" }, d.label), /* @__PURE__ */ React.createElement("span", { className: `font-semibold num ${d.value < 0 ? "text-red-400" : "text-zinc-300"}` }, format(d.value))), /* @__PURE__ */ React.createElement("div", { className: "h-2 bg-zinc-800 rounded-full overflow-hidden" }, /* @__PURE__ */ React.createElement("div", { className: `h-full rounded-full ${d.value < 0 ? "bg-red-500" : "bg-red-600"}`, style: { width: `${Math.abs(d.value) / max * 100}%` } })))));
+}
+function Empty({ icon = "\u{1F4C4}", msg, action }) {
+  return /* @__PURE__ */ React.createElement("div", { className: "text-center py-12 text-zinc-500" }, /* @__PURE__ */ React.createElement("div", { className: "text-4xl mb-2" }, icon), /* @__PURE__ */ React.createElement("p", { className: "text-sm mb-3" }, msg), action);
+}
+function AutoComplete({ value, onChange, onPick, options, render, placeholder, className, inputRef, onEnterEmpty, allowCreate, onCreate, onArrow }) {
+  const [open, setOpen] = useState(false);
+  const [hi, setHi] = useState(0);
+  const wrapRef = useRef(null);
+  const filtered = useMemo(() => {
+    const q = clamp(value);
+    if (!q) return options.slice(0, 8);
+    return options.filter((o) => clamp(o.label).includes(q) || clamp(o.sub || "").includes(q)).slice(0, 8);
+  }, [value, options]);
+  useEffect(() => {
+    const h = (e) => {
+      if (wrapRef.current && !wrapRef.current.contains(e.target)) setOpen(false);
+    };
+    document.addEventListener("mousedown", h);
+    return () => document.removeEventListener("mousedown", h);
+  }, []);
+  const pick = (o) => {
+    onPick(o);
+    setOpen(false);
+  };
+  // ArrowUp/Down normally browse the suggestion list. But inside a keyboard-first
+  // billing grid, Up/Down should instead jump to the same field in the prev/next
+  // row (see useGridNav) — so when this field has no live query to browse
+  // (nothing typed, or nothing matches) and a grid gave us `onArrow`, hand the
+  // key off to the grid instead of moving the highlight. Components that don't
+  // pass `onArrow` (plain pickers like the Party Ledger search) keep the
+  // original arrow-browses-suggestions behavior untouched.
+  const keydown = (e) => {
+    if (e.key === "ArrowDown") {
+      if (onArrow && !(value.trim() && filtered.length)) {
+        e.preventDefault();
+        onArrow("down");
+        return;
+      }
+      e.preventDefault();
+      setOpen(true);
+      setHi((h) => Math.min(h + 1, filtered.length - 1));
+    } else if (e.key === "ArrowUp") {
+      if (onArrow && !(value.trim() && filtered.length)) {
+        e.preventDefault();
+        onArrow("up");
+        return;
+      }
+      e.preventDefault();
+      setHi((h) => Math.max(h - 1, 0));
+    } else if (e.key === "Enter") {
+      if (open && filtered[hi]) {
+        e.preventDefault();
+        pick(filtered[hi]);
+      } else if (allowCreate && value.trim() && !filtered.length) {
+        e.preventDefault();
+        onCreate(value.trim());
+        setOpen(false);
+      } else if (onEnterEmpty) {
+        onEnterEmpty(e);
+      }
+    } else if (e.key === "Escape") setOpen(false);
+  };
+  return /* @__PURE__ */ React.createElement("div", { ref: wrapRef, className: "relative" }, /* @__PURE__ */ React.createElement(
+    "input",
+    {
+      ref: inputRef,
+      value,
+      placeholder,
+      className: className || inputCls,
+      onChange: (e) => {
+        onChange(e.target.value);
+        setOpen(true);
+        setHi(0);
+      },
+      onFocus: () => setOpen(true),
+      onKeyDown: keydown
+    }
+  ), open && (filtered.length > 0 || allowCreate && value.trim()) && /* @__PURE__ */ React.createElement("div", { className: "absolute top-full left-0 right-0 mt-1 bg-zinc-900 border border-zinc-700 rounded-xl shadow-xl z-[400] max-h-56 overflow-y-auto min-w-[220px]" }, filtered.map((o, i) => /* @__PURE__ */ React.createElement(
+    "div",
+    {
+      key: o.id || i,
+      className: `px-3 py-2 cursor-pointer text-sm text-zinc-200 ${i === hi ? "bg-zinc-800" : "hover:bg-zinc-800"}`,
+      onMouseEnter: () => setHi(i),
+      onMouseDown: (e) => {
+        e.preventDefault();
+        pick(o);
+      }
+    },
+    render ? render(o) : /* @__PURE__ */ React.createElement("span", null, o.label)
+  )), allowCreate && value.trim() && !options.some((o) => clamp(o.label) === clamp(value)) && /* @__PURE__ */ React.createElement(
+    "div",
+    {
+      className: "px-3 py-2 cursor-pointer text-sm text-emerald-400 font-semibold border-t border-zinc-800 hover:bg-emerald-950/40",
+      onMouseDown: (e) => {
+        e.preventDefault();
+        onCreate(value.trim());
+        setOpen(false);
+      }
+    },
+    '+ Add "',
+    value.trim(),
+    '"'
+  )));
+}
+function Table({ head, children, foot }) {
+  return /* @__PURE__ */ React.createElement("div", { className: "overflow-x-auto rounded-xl border border-zinc-800 bg-zinc-900" }, /* @__PURE__ */ React.createElement("table", { className: "w-full text-sm min-w-[560px]" }, /* @__PURE__ */ React.createElement("thead", null, /* @__PURE__ */ React.createElement("tr", { className: "bg-zinc-800/60 text-left" }, head.map((h, i) => /* @__PURE__ */ React.createElement("th", { key: i, className: `px-3 py-2.5 text-[11px] font-bold uppercase tracking-wide text-zinc-400 whitespace-nowrap ${h.right ? "text-right" : ""}` }, h.t !== void 0 ? h.t : h)))), /* @__PURE__ */ React.createElement("tbody", { className: "divide-y divide-zinc-800" }, children), foot && /* @__PURE__ */ React.createElement("tfoot", { className: "bg-zinc-800/60 font-bold border-t-2 border-zinc-700" }, foot)));
+}
+const Td = ({ right, className = "", children, ...p }) => /* @__PURE__ */ React.createElement("td", { ...p, className: `px-3 py-2.5 ${right ? "text-right num" : ""} ${className}` }, children);
+
+/**
+ * Shared keyboard-nav hook for spreadsheet-style entry grids (New Sale, New
+ * Purchase, and any future grid). Centralizing this once means every grid
+ * gets the same feel — Tab/Shift+Tab move fields natively, Enter moves to the
+ * next field (or commits + starts a new row on the last field), and Arrow
+ * Up/Down jump to the same field on the prev/next row — instead of every
+ * screen re-implementing (and slowly drifting from) its own version.
+ */
+function useGridNav(flow) {
+  const refs = useRef({});
+  const setCellRef = (key, field) => (el) => { refs.current[`${key}:${field}`] = el; };
+  const focusCell = (key, field) => setTimeout(() => {
+    const el = refs.current[`${key}:${field}`];
+    if (el) { el.focus(); el.select && el.select(); }
+  }, 30);
+  // Wire this to a plain <input>'s onKeyDown. `rows` is the current line array
+  // (each item needs a `.key`), `addRow` appends a new blank row and returns its key.
+  const onCellKey = (e, key, field, rows, addRow) => {
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      const idx = rows.findIndex((r) => r.key === key);
+      const nextIdx = e.key === "ArrowDown" ? idx + 1 : idx - 1;
+      if (nextIdx >= 0 && nextIdx < rows.length) focusCell(rows[nextIdx].key, field);
+      return;
+    }
+    if (e.key !== "Enter") return;
+    e.preventDefault();
+    const i = flow.indexOf(field);
+    if (i < flow.length - 1) { focusCell(key, flow[i + 1]); return; }
+    const idx = rows.findIndex((r) => r.key === key);
+    if (idx === rows.length - 1) {
+      const nk = addRow();
+      focusCell(nk, flow[0]);
+    } else focusCell(rows[idx + 1].key, flow[0]);
+  };
+  // AutoComplete cells intercept arrow keys themselves (to browse suggestions),
+  // so they hand control back to us via this instead of onCellKey — see the
+  // `onArrow` prop on AutoComplete.
+  const onArrow = (key, field, rows) => (dir) => {
+    const idx = rows.findIndex((r) => r.key === key);
+    const nextIdx = dir === "down" ? idx + 1 : idx - 1;
+    if (nextIdx >= 0 && nextIdx < rows.length) focusCell(rows[nextIdx].key, field);
+  };
+  return { setCellRef, focusCell, onCellKey, onArrow };
+}
+
+/**
+ * After every save, ask "Save & New or Done?" instead of silently bouncing to
+ * a list screen. A cashier who just billed one customer usually has another
+ * one waiting — Save & New (Enter) resets the form and refocuses the first
+ * field with zero mouse movement; Done is for when the queue is empty.
+ */
+function SaveConfirmModal({ label, amount, cur, onSaveNew, onDone }) {
+  const btnRef = useRef(null);
+  useEffect(() => { btnRef.current && btnRef.current.focus(); }, []);
+  return /* @__PURE__ */ React.createElement(Modal, { title: "Saved", onClose: onDone }, /* @__PURE__ */ React.createElement("p", { className: "text-sm text-zinc-300 mb-5" }, label, " saved ✓", amount != null && /* @__PURE__ */ React.createElement(React.Fragment, null, " — ", /* @__PURE__ */ React.createElement("b", { className: "num text-zinc-100" }, fmt(amount, cur)))), /* @__PURE__ */ React.createElement("div", { className: "flex gap-2 justify-end" }, /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", onClick: onDone }, "Done"), /* @__PURE__ */ React.createElement(
+    "button",
+    {
+      ref: btnRef,
+      onClick: onSaveNew,
+      className: "inline-flex items-center justify-center gap-1.5 rounded-lg font-semibold transition-colors px-4 py-2 text-sm bg-red-600 text-white hover:bg-red-500"
+    },
+    "Save & New ",
+    /* @__PURE__ */ React.createElement("span", { className: "opacity-60 text-[10px]" }, "Enter")
+  )));
+}
+
+const SHORTCUTS = [
+  ["Tab / Shift+Tab", "Next / previous field"],
+  ["Enter", "Next field — on a grid's last field, commits the row and starts a new one"],
+  ["↑ / ↓", "Same field, previous / next row (inside a grid)"],
+  ["Ctrl+S", "Save"],
+  ["Ctrl+N", "New sale"],
+  ["Ctrl+K", "Open command palette (search pages, parties, items, invoices)"],
+  ["Esc", "Close the open modal"],
+  ["?", "Show this shortcut sheet"]
+];
+function ShortcutSheet({ onClose }) {
+  return /* @__PURE__ */ React.createElement(Modal, { title: "Keyboard shortcuts", onClose }, /* @__PURE__ */ React.createElement("div", null, SHORTCUTS.map(([k, d], i) => /* @__PURE__ */ React.createElement("div", { key: i, className: "flex items-center justify-between gap-4 text-sm py-2 border-b border-zinc-800 last:border-0" }, /* @__PURE__ */ React.createElement("span", { className: "text-zinc-300" }, d), /* @__PURE__ */ React.createElement("kbd", { className: "px-2 py-1 rounded-md bg-zinc-800 border border-zinc-700 text-zinc-100 text-xs font-mono whitespace-nowrap" }, k)))));
+}
+
+/** Ctrl+K global search across pages, parties, items and recent invoices. */
+function CommandPalette({ db, go, isOwner, onClose }) {
+  const [q, setQ] = useState("");
+  const [hi, setHi] = useState(0);
+  const inputRef = useRef(null);
+  useEffect(() => { inputRef.current && inputRef.current.focus(); }, []);
+  useEffect(() => {
+    const h = (e) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, [onClose]);
+  const results = useMemo(() => {
+    const s = clamp(q);
+    const out = [];
+    NAV.flatMap((sec) => sec.items).filter((it) => !it.ownerOnly || isOwner).forEach((it) => {
+      if (!s || clamp(it.label).includes(s)) out.push({ type: "Page", icon: it.icon, label: it.label, action: () => go(it.id) });
+    });
+    if (s) {
+      db.parties.filter((p) => clamp(p.name).includes(s)).slice(0, 5).forEach((p) => out.push({ type: "Party", icon: "\u{1F465}", label: p.name, action: () => go("party-detail", { partyId: p.id }) }));
+      db.items.filter((i) => clamp(i.name).includes(s)).slice(0, 5).forEach((i) => out.push({ type: "Item", icon: "\u{1F3F7}️", label: i.name, action: () => go("items") }));
+      db.invoices.filter((inv) => clamp(inv.invNo).includes(s) || clamp(inv.partyName).includes(s)).slice(0, 5).forEach((inv) => out.push({ type: "Invoice", icon: "\u{1F9FE}", label: `${inv.invNo} — ${inv.partyName}`, action: () => go("sales") }));
+    }
+    return out.slice(0, 20);
+  }, [q, db, go, isOwner]);
+  useEffect(() => setHi(0), [q]);
+  const activate = (r) => { if (r) { r.action(); onClose(); } };
+  const keydown = (e) => {
+    if (e.key === "ArrowDown") { e.preventDefault(); setHi((h) => Math.min(h + 1, results.length - 1)); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); setHi((h) => Math.max(h - 1, 0)); }
+    else if (e.key === "Enter") { e.preventDefault(); activate(results[hi]); }
+  };
+  return /* @__PURE__ */ React.createElement("div", { className: "fixed inset-0 z-[600] bg-black/70 flex items-start justify-center pt-24 px-4", onMouseDown: (e) => { if (e.target === e.currentTarget) onClose(); } }, /* @__PURE__ */ React.createElement("div", { className: "anim-in bg-zinc-900 border border-zinc-700 w-full max-w-lg rounded-2xl shadow-2xl overflow-hidden" }, /* @__PURE__ */ React.createElement("input", { ref: inputRef, value: q, onChange: (e) => setQ(e.target.value), onKeyDown: keydown, placeholder: "Search pages, parties, items, invoices…", className: "w-full px-4 py-3 bg-zinc-900 text-zinc-100 placeholder:text-zinc-500 border-b border-zinc-800 focus:outline-none" }), /* @__PURE__ */ React.createElement("div", { className: "max-h-80 overflow-y-auto" }, results.length === 0 ? /* @__PURE__ */ React.createElement("div", { className: "px-4 py-6 text-sm text-zinc-500 text-center" }, "No matches") : results.map((r, i) => /* @__PURE__ */ React.createElement(
+    "div",
+    {
+      key: i,
+      className: `flex items-center gap-3 px-4 py-2.5 cursor-pointer text-sm ${i === hi ? "bg-zinc-800" : "hover:bg-zinc-800/60"}`,
+      onMouseEnter: () => setHi(i),
+      onMouseDown: (e) => { e.preventDefault(); activate(r); }
+    },
+    /* @__PURE__ */ React.createElement("span", { className: "text-base" }, r.icon),
+    /* @__PURE__ */ React.createElement("span", { className: "flex-1 text-zinc-100" }, r.label),
+    /* @__PURE__ */ React.createElement("span", { className: "text-[10px] font-bold uppercase tracking-wide text-zinc-500" }, r.type)
+  ))), /* @__PURE__ */ React.createElement("div", { className: "px-4 py-2 border-t border-zinc-800 text-[11px] text-zinc-500 flex justify-between" }, /* @__PURE__ */ React.createElement("span", null, "↑↓ navigate • Enter select"), /* @__PURE__ */ React.createElement("span", null, "Esc close"))));
+}
+const NAV = [
+  { sec: "MAIN", items: [
+    { id: "dashboard", icon: "\u25A6", label: "Dashboard" },
+    { id: "new-sale", icon: "\u{1F9FE}", label: "New Sale" },
+    { id: "sales", icon: "\u{1F4CB}", label: "Sales List" },
+    { id: "payments", icon: "\u{1F4B0}", label: "Payments" },
+    { id: "bulk-payment", icon: "\u{1F4B8}", label: "Bulk Payment" },
+    { id: "followups", icon: "\u{1F4C5}", label: "Follow-ups" }
+  ] },
+  { sec: "SALES SUITE", items: [
+    { id: "quotations", icon: "\u{1F4C4}", label: "Quotations" },
+    { id: "sales-orders", icon: "\u{1F4DD}", label: "Sales Orders" },
+    { id: "sales-returns", icon: "\u21A9\uFE0F", label: "Sales Returns" }
+  ] },
+  { sec: "PURCHASE & STOCK", items: [
+    { id: "new-purchase", icon: "\u{1F4E5}", label: "New Purchase" },
+    { id: "purchases", icon: "\u{1F4E6}", label: "Purchase List" },
+    { id: "purchase-returns", icon: "\u21A9\uFE0F", label: "Purchase Returns" },
+    { id: "items", icon: "\u{1F3F7}\uFE0F", label: "Items & Stock" },
+    { id: "parties", icon: "\u{1F465}", label: "Parties" }
+  ] },
+  { sec: "SETUP", items: [
+    { id: "opening-bills", icon: "\u{1F4DC}", label: "Opening Bills" },
+    { id: "admin", icon: "\u{1F510}", label: "Admin & Roles", ownerOnly: true }
+  ] },
+  { sec: "INSIGHTS", items: [
+    { id: "reports", icon: "\u{1F4CA}", label: "Reports" },
+    { id: "settings", icon: "\u2699\uFE0F", label: "Settings", ownerOnly: true }
+  ] }
+];
+const MOBILE_NAV = ["dashboard", "new-sale", "sales", "items", "reports"];
+function App() {
+  const [db, setDb] = useState(null);
+  const [page, setPage] = useState("dashboard");
+  const [pageProps, setPageProps] = useState({});
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [error, setError] = useState(null);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const load = () => {
+    gs("bootstrap").then((data) => setDb(data)).catch((e) => setError(String(e && e.message || e)));
+  };
+  useEffect(load, []);
+  // Global shortcuts, available from anywhere in the app (not just billing grids):
+  // Ctrl/Cmd+K opens the command palette, "?" opens the shortcut cheat-sheet,
+  // Ctrl/Cmd+N jumps straight to New Sale — the most common "start a new entry" action.
+  useEffect(() => {
+    const h = (e) => {
+      const tag = (e.target && e.target.tagName) || "";
+      const typing = tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || e.target.isContentEditable;
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setPaletteOpen(true);
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "n") {
+        e.preventDefault();
+        setPage("new-sale");
+        setPageProps({});
+      } else if (e.key === "?" && !typing) {
+        e.preventDefault();
+        setShortcutsOpen(true);
+      }
+    };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, []);
+  const derived = useMemo(() => {
+    if (!db) return null;
+    const itemMap = {}, partyMap = {};
+    db.items.forEach((i) => itemMap[i.id] = i);
+    db.parties.forEach((p) => partyMap[p.id] = p);
+    const paidByRef = {};
+    const payInByParty = {}, payOutByParty = {};
+    db.payments.forEach((pm) => {
+      if (pm.refId) paidByRef[pm.refId] = (paidByRef[pm.refId] || 0) + n2(pm.amount);
+      if (pm.direction === "In") payInByParty[pm.partyId] = (payInByParty[pm.partyId] || 0) + n2(pm.amount);
+      if (pm.direction === "Out") payOutByParty[pm.partyId] = (payOutByParty[pm.partyId] || 0) + n2(pm.amount);
+    });
+    const salesByParty = {}, purByParty = {};
+    db.invoices.forEach((i) => salesByParty[i.partyId] = (salesByParty[i.partyId] || 0) + n2(i.total));
+    db.purchases.forEach((p) => purByParty[p.partyId] = (purByParty[p.partyId] || 0) + n2(p.total));
+    // Opening balances (Module 3) are historical bills entered before this system existed.
+    // Each row already carries the amount paid BEFORE seeding (its own paidAmount field —
+    // there's no real Payments row for money collected before the app existed); anything
+    // paid AFTER seeding goes through the normal Payments sheet against refId=this row's id,
+    // which paidByRef above already sums generically regardless of refType.
+    const obByParty = {};
+    db.openingBalances.forEach((ob) => {
+      const due = n2(ob.amount) - n2(ob.paidAmount) - (paidByRef[ob.id] || 0);
+      obByParty[ob.partyId] = (obByParty[ob.partyId] || 0) + (ob.type === "Purchase" ? -due : due);
+    });
+    const partyBalance = {};
+    db.parties.forEach((p) => {
+      partyBalance[p.id] = n2(p.openingBalance) + (salesByParty[p.id] || 0) - (payInByParty[p.id] || 0) - (purByParty[p.id] || 0) + (payOutByParty[p.id] || 0) + (obByParty[p.id] || 0);
+    });
+    const linesByInvoice = {}, linesByPurchase = {};
+    db.invoiceItems.forEach((l) => (linesByInvoice[l.invoiceId] = linesByInvoice[l.invoiceId] || []).push(l));
+    db.purchaseItems.forEach((l) => (linesByPurchase[l.purchaseId] = linesByPurchase[l.purchaseId] || []).push(l));
+    const linesByQuotation = {}, linesBySalesOrder = {}, linesBySalesReturn = {};
+    db.quotationItems.forEach((l) => (linesByQuotation[l.quotationId] = linesByQuotation[l.quotationId] || []).push(l));
+    db.salesOrderItems.forEach((l) => (linesBySalesOrder[l.salesOrderId] = linesBySalesOrder[l.salesOrderId] || []).push(l));
+    db.salesReturnItems.forEach((l) => (linesBySalesReturn[l.salesReturnId] = linesBySalesReturn[l.salesReturnId] || []).push(l));
+    // How much of each invoice line has already been returned, so the Sales Return
+    // screen can cap a line at (originally invoiced qty − already returned qty)
+    // instead of letting someone return the same goods twice.
+    const returnedQtyByInvoiceItem = {};
+    db.salesReturnItems.forEach((l) => {
+      if (l.invoiceItemId) returnedQtyByInvoiceItem[l.invoiceItemId] = (returnedQtyByInvoiceItem[l.invoiceItemId] || 0) + n2(l.qty);
+    });
+    const linesByPurchaseReturn = {};
+    db.purchaseReturnItems.forEach((l) => (linesByPurchaseReturn[l.purchaseReturnId] = linesByPurchaseReturn[l.purchaseReturnId] || []).push(l));
+    // Mirrors returnedQtyByInvoiceItem above — caps a Purchase Return line at
+    // (originally purchased qty − already returned qty).
+    const returnedQtyByPurchaseItem = {};
+    db.purchaseReturnItems.forEach((l) => {
+      if (l.purchaseItemId) returnedQtyByPurchaseItem[l.purchaseItemId] = (returnedQtyByPurchaseItem[l.purchaseItemId] || 0) + n2(l.qty);
+    });
+    return { itemMap, partyMap, paidByRef, partyBalance, linesByInvoice, linesByPurchase, linesByQuotation, linesBySalesOrder, linesBySalesReturn, returnedQtyByInvoiceItem, linesByPurchaseReturn, returnedQtyByPurchaseItem };
+  }, [db]);
+  const mutate = (fn) => setDb((d) => fn(typeof structuredClone === "function" ? structuredClone(d) : JSON.parse(JSON.stringify(d))));
+  const actions = useMemo(() => ({
+    reload: load,
+    saveItem: async (item) => {
+      const res = await gs("apiSaveItem", JSON.stringify(item));
+      mutate((d) => {
+        const i = d.items.findIndex((x) => x.id === res.record.id);
+        i >= 0 ? d.items[i] = res.record : d.items.push(res.record);
+        return d;
+      });
+      toast("Item saved");
+      return res.record;
+    },
+    deleteItem: async (id) => {
+      mutate((d) => {
+        d.items = d.items.filter((x) => x.id !== id);
+        return d;
+      });
+      await gs("apiDeleteItem", id);
+      toast("Item deleted");
+    },
+    saveParty: async (party) => {
+      const res = await gs("apiSaveParty", JSON.stringify(party));
+      mutate((d) => {
+        const i = d.parties.findIndex((x) => x.id === res.record.id);
+        i >= 0 ? d.parties[i] = res.record : d.parties.push(res.record);
+        return d;
+      });
+      toast("Party saved");
+      return res.record;
+    },
+    deleteParty: async (id) => {
+      mutate((d) => {
+        d.parties = d.parties.filter((x) => x.id !== id);
+        return d;
+      });
+      await gs("apiDeleteParty", id);
+      toast("Party deleted");
+    },
+    saveContact: async (contact) => {
+      const res = await gs("apiSaveContact", JSON.stringify(contact));
+      mutate((d) => {
+        const i = d.partyContacts.findIndex((x) => x.id === res.record.id);
+        i >= 0 ? d.partyContacts[i] = res.record : d.partyContacts.push(res.record);
+        return d;
+      });
+      toast("Contact saved");
+      return res.record;
+    },
+    deleteContact: async (id) => {
+      mutate((d) => {
+        d.partyContacts = d.partyContacts.filter((x) => x.id !== id);
+        return d;
+      });
+      await gs("apiDeleteContact", id);
+      toast("Contact deleted");
+    },
+    saveOpeningBalance: async (ob) => {
+      const res = await gs("apiSaveOpeningBalance", JSON.stringify(ob));
+      mutate((d) => {
+        const i = d.openingBalances.findIndex((x) => x.id === res.record.id);
+        i >= 0 ? d.openingBalances[i] = res.record : d.openingBalances.push(res.record);
+        return d;
+      });
+      toast("Opening bill saved");
+      return res.record;
+    },
+    deleteOpeningBalance: async (id) => {
+      mutate((d) => {
+        d.openingBalances = d.openingBalances.filter((x) => x.id !== id);
+        return d;
+      });
+      await gs("apiDeleteOpeningBalance", id);
+      toast("Opening bill deleted");
+    },
+    saveFollowup: async (f) => {
+      const res = await gs("apiSaveFollowup", JSON.stringify(f));
+      mutate((d) => {
+        const i = d.followups.findIndex((x) => x.id === res.record.id);
+        i >= 0 ? d.followups[i] = res.record : d.followups.push(res.record);
+        return d;
+      });
+      toast("Follow-up saved");
+      return res.record;
+    },
+    deleteFollowup: async (id) => {
+      mutate((d) => {
+        d.followups = d.followups.filter((x) => x.id !== id);
+        return d;
+      });
+      await gs("apiDeleteFollowup", id);
+      toast("Follow-up deleted");
+    },
+    saveUser: async (u) => {
+      const res = await gs("apiSaveUser", JSON.stringify(u));
+      mutate((d) => {
+        const i = d.users.findIndex((x) => x.id === res.record.id);
+        i >= 0 ? d.users[i] = res.record : d.users.push(res.record);
+        return d;
+      });
+      toast("User saved");
+      return res.record;
+    },
+    deleteUser: async (id) => {
+      mutate((d) => {
+        d.users = d.users.filter((x) => x.id !== id);
+        return d;
+      });
+      await gs("apiDeleteUser", id);
+      toast("User removed");
+    },
+    saveQuotation: async (payload) => {
+      const res = await gs("apiSaveQuotation", JSON.stringify(payload));
+      mutate((d) => {
+        const i = d.quotations.findIndex((x) => x.id === res.quotation.id);
+        i >= 0 ? d.quotations[i] = res.quotation : d.quotations.push(res.quotation);
+        d.quotationItems = d.quotationItems.filter((l) => l.quotationId !== res.quotation.id).concat(res.items);
+        return d;
+      });
+      toast(`Quotation ${res.quotation.quoNo} saved`);
+      return res;
+    },
+    deleteQuotation: async (id) => {
+      mutate((d) => {
+        d.quotationItems = d.quotationItems.filter((l) => l.quotationId !== id);
+        d.quotations = d.quotations.filter((x) => x.id !== id);
+        return d;
+      });
+      await gs("apiDeleteQuotation", id);
+      toast("Quotation deleted");
+    },
+    saveSalesOrder: async (payload) => {
+      const res = await gs("apiSaveSalesOrder", JSON.stringify(payload));
+      mutate((d) => {
+        const i = d.salesOrders.findIndex((x) => x.id === res.salesOrder.id);
+        i >= 0 ? d.salesOrders[i] = res.salesOrder : d.salesOrders.push(res.salesOrder);
+        d.salesOrderItems = d.salesOrderItems.filter((l) => l.salesOrderId !== res.salesOrder.id).concat(res.items);
+        return d;
+      });
+      toast(`Sales Order ${res.salesOrder.soNo} saved`);
+      return res;
+    },
+    deleteSalesOrder: async (id) => {
+      mutate((d) => {
+        d.salesOrderItems = d.salesOrderItems.filter((l) => l.salesOrderId !== id);
+        d.salesOrders = d.salesOrders.filter((x) => x.id !== id);
+        return d;
+      });
+      await gs("apiDeleteSalesOrder", id);
+      toast("Sales Order deleted");
+    },
+    markConverted: async (sheet, id) => {
+      mutate((d) => {
+        const list = sheet === "Quotations" ? d.quotations : d.salesOrders;
+        const row = list.find((x) => x.id === id);
+        if (row) row.status = "Converted";
+        return d;
+      });
+      await gs("apiMarkConverted", JSON.stringify({ sheet, id }));
+    },
+    saveSalesReturn: async (payload) => {
+      const res = await gs("apiSaveSalesReturn", JSON.stringify(payload));
+      mutate((d) => {
+        const i = d.salesReturns.findIndex((x) => x.id === res.salesReturn.id);
+        i >= 0 ? d.salesReturns[i] = res.salesReturn : d.salesReturns.push(res.salesReturn);
+        d.salesReturnItems = d.salesReturnItems.filter((l) => l.salesReturnId !== res.salesReturn.id).concat(res.items);
+        const deltas = {};
+        res.items.forEach((l) => {
+          if (l.itemId) deltas[l.itemId] = (deltas[l.itemId] || 0) + n2(l.qty);
+        });
+        d.items.forEach((it) => {
+          if (deltas[it.id]) it.stock = n2(it.stock) + deltas[it.id];
+        });
+        if (n2(res.salesReturn.total) > 0 && res.salesReturn.sourceId) {
+          const pIdx = d.payments.findIndex((x) => x.id === res.salesReturn.id);
+          const paymentRow = { id: res.salesReturn.id, date: res.salesReturn.date, partyId: res.salesReturn.partyId, partyName: res.salesReturn.partyName, refType: "SalesReturn", refId: res.salesReturn.sourceId, amount: n2(res.salesReturn.total), mode: res.salesReturn.srNo, direction: "In", notes: "Goods returned, return " + res.salesReturn.srNo };
+          pIdx >= 0 ? d.payments[pIdx] = paymentRow : d.payments.push(paymentRow);
+        }
+        return d;
+      });
+      toast(`Sales Return ${res.salesReturn.srNo} saved ✓ Stock updated`);
+      return res;
+    },
+    deleteSalesReturn: async (id) => {
+      mutate((d) => {
+        const deltas = {};
+        d.salesReturnItems.filter((l) => l.salesReturnId === id).forEach((l) => {
+          if (l.itemId) deltas[l.itemId] = (deltas[l.itemId] || 0) - n2(l.qty);
+        });
+        d.items.forEach((it) => {
+          if (deltas[it.id]) it.stock = n2(it.stock) + deltas[it.id];
+        });
+        d.salesReturnItems = d.salesReturnItems.filter((l) => l.salesReturnId !== id);
+        d.payments = d.payments.filter((x) => x.id !== id);
+        d.salesReturns = d.salesReturns.filter((x) => x.id !== id);
+        return d;
+      });
+      await gs("apiDeleteSalesReturn", id);
+      toast("Sales Return deleted");
+    },
+    markDispatch: async (invoiceId, action, details = {}) => {
+      const res = await gs("apiMarkDispatch", JSON.stringify({ invoiceId, action, ...details }));
+      mutate((d) => {
+        const inv = d.invoices.find((x) => x.id === invoiceId);
+        if (inv) {
+          inv.dispatchStatus = res.dispatchStatus;
+          inv.dispatchedAt = res.dispatchedAt;
+        }
+        return d;
+      });
+      toast(action === "Dispatched" ? "Marked dispatched" : "Reverted to pending");
+    },
+    savePurchaseReturn: async (payload) => {
+      const res = await gs("apiSavePurchaseReturn", JSON.stringify(payload));
+      mutate((d) => {
+        const i = d.purchaseReturns.findIndex((x) => x.id === res.purchaseReturn.id);
+        i >= 0 ? d.purchaseReturns[i] = res.purchaseReturn : d.purchaseReturns.push(res.purchaseReturn);
+        d.purchaseReturnItems = d.purchaseReturnItems.filter((l) => l.purchaseReturnId !== res.purchaseReturn.id).concat(res.items);
+        const deltas = {};
+        res.items.forEach((l) => {
+          if (l.itemId) deltas[l.itemId] = (deltas[l.itemId] || 0) - n2(l.qty);
+        });
+        d.items.forEach((it) => {
+          if (deltas[it.id]) it.stock = n2(it.stock) + deltas[it.id];
+        });
+        if (n2(res.purchaseReturn.total) > 0 && res.purchaseReturn.sourceId) {
+          const pIdx = d.payments.findIndex((x) => x.id === res.purchaseReturn.id);
+          const paymentRow = { id: res.purchaseReturn.id, date: res.purchaseReturn.date, partyId: res.purchaseReturn.partyId, partyName: res.purchaseReturn.partyName, refType: "PurchaseReturn", refId: res.purchaseReturn.sourceId, amount: n2(res.purchaseReturn.total), mode: res.purchaseReturn.prNo, direction: "Out", notes: "Goods returned to supplier, return " + res.purchaseReturn.prNo };
+          pIdx >= 0 ? d.payments[pIdx] = paymentRow : d.payments.push(paymentRow);
+        }
+        return d;
+      });
+      toast(`Purchase Return ${res.purchaseReturn.prNo} saved ✓ Stock updated`);
+      return res;
+    },
+    deletePurchaseReturn: async (id) => {
+      mutate((d) => {
+        const deltas = {};
+        d.purchaseReturnItems.filter((l) => l.purchaseReturnId === id).forEach((l) => {
+          if (l.itemId) deltas[l.itemId] = (deltas[l.itemId] || 0) + n2(l.qty);
+        });
+        d.items.forEach((it) => {
+          if (deltas[it.id]) it.stock = n2(it.stock) + deltas[it.id];
+        });
+        d.purchaseReturnItems = d.purchaseReturnItems.filter((l) => l.purchaseReturnId !== id);
+        d.payments = d.payments.filter((x) => x.id !== id);
+        d.purchaseReturns = d.purchaseReturns.filter((x) => x.id !== id);
+        return d;
+      });
+      await gs("apiDeletePurchaseReturn", id);
+      toast("Purchase Return deleted");
+    },
+    uploadVisitingCard: async (party, file) => {
+      const base64 = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result.split(",")[1]);
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+      const res = await gs("apiUploadVisitingCard", JSON.stringify({ partyId: party.id, name: file.name, mimeType: file.type, base64 }));
+      const updated = { ...party, visitingCardUrl: res.url };
+      await gs("apiSaveParty", JSON.stringify(updated));
+      mutate((d) => {
+        const i = d.parties.findIndex((x) => x.id === party.id);
+        if (i >= 0) d.parties[i] = updated;
+        return d;
+      });
+      toast("Visiting card uploaded");
+    },
+    saveInvoice: async (payload) => {
+      const res = await gs("apiSaveInvoice", JSON.stringify(payload));
+      mutate((d) => {
+        const i = d.invoices.findIndex((x) => x.id === res.invoice.id);
+        i >= 0 ? d.invoices[i] = res.invoice : d.invoices.push(res.invoice);
+        d.invoiceItems = d.invoiceItems.filter((l) => l.invoiceId !== res.invoice.id).concat(res.items);
+        const deltas = {};
+        (payload._oldLines || []).forEach((l) => {
+          if (l.itemId) deltas[l.itemId] = (deltas[l.itemId] || 0) + n2(l.qty);
+        });
+        res.items.forEach((l) => {
+          if (l.itemId) deltas[l.itemId] = (deltas[l.itemId] || 0) - n2(l.qty);
+        });
+        d.items.forEach((it) => {
+          if (deltas[it.id]) it.stock = n2(it.stock) + deltas[it.id];
+        });
+        if (payload.payment && n2(payload.payment.amount) > 0) {
+          d.payments.push({ id: uid(), date: res.invoice.date, partyId: res.invoice.partyId, partyName: res.invoice.partyName, refType: "Sale", refId: res.invoice.id, amount: n2(payload.payment.amount), mode: payload.payment.mode, direction: "In", notes: "Received with invoice " + res.invoice.invNo });
+        }
+        return d;
+      });
+      return res;
+    },
+    deleteInvoice: async (id) => {
+      mutate((d) => {
+        const deltas = {};
+        d.invoiceItems.filter((l) => l.invoiceId === id).forEach((l) => {
+          if (l.itemId) deltas[l.itemId] = (deltas[l.itemId] || 0) + n2(l.qty);
+        });
+        d.items.forEach((it) => {
+          if (deltas[it.id]) it.stock = n2(it.stock) + deltas[it.id];
+        });
+        d.invoiceItems = d.invoiceItems.filter((l) => l.invoiceId !== id);
+        d.payments = d.payments.filter((pm) => pm.refId !== id);
+        d.invoices = d.invoices.filter((i) => i.id !== id);
+        return d;
+      });
+      await gs("apiDeleteInvoice", id);
+      toast("Invoice deleted");
+    },
+    savePurchase: async (payload) => {
+      const res = await gs("apiSavePurchase", JSON.stringify(payload));
+      mutate((d) => {
+        const i = d.purchases.findIndex((x) => x.id === res.purchase.id);
+        i >= 0 ? d.purchases[i] = res.purchase : d.purchases.push(res.purchase);
+        d.purchaseItems = d.purchaseItems.filter((l) => l.purchaseId !== res.purchase.id).concat(res.items);
+        const deltas = {};
+        const costMap = {};
+        (payload._oldLines || []).forEach((l) => {
+          if (l.itemId) deltas[l.itemId] = (deltas[l.itemId] || 0) - n2(l.qty);
+        });
+        res.items.forEach((l) => {
+          if (l.itemId) {
+            deltas[l.itemId] = (deltas[l.itemId] || 0) + n2(l.qty);
+            costMap[l.itemId] = n2(l.rate);
+          }
+        });
+        d.items.forEach((it) => {
+          if (deltas[it.id]) it.stock = n2(it.stock) + deltas[it.id];
+          if (costMap[it.id] > 0) it.purchaseRate = costMap[it.id];
+        });
+        if (payload.payment && n2(payload.payment.amount) > 0) {
+          d.payments.push({ id: uid(), date: res.purchase.date, partyId: res.purchase.partyId, partyName: res.purchase.partyName, refType: "Purchase", refId: res.purchase.id, amount: n2(payload.payment.amount), mode: payload.payment.mode, direction: "Out", notes: "Paid with bill " + res.purchase.billNo });
+        }
+        return d;
+      });
+      return res;
+    },
+    deletePurchase: async (id) => {
+      mutate((d) => {
+        const deltas = {};
+        d.purchaseItems.filter((l) => l.purchaseId === id).forEach((l) => {
+          if (l.itemId) deltas[l.itemId] = (deltas[l.itemId] || 0) - n2(l.qty);
+        });
+        d.items.forEach((it) => {
+          if (deltas[it.id]) it.stock = n2(it.stock) + deltas[it.id];
+        });
+        d.purchaseItems = d.purchaseItems.filter((l) => l.purchaseId !== id);
+        d.payments = d.payments.filter((pm) => pm.refId !== id);
+        d.purchases = d.purchases.filter((i) => i.id !== id);
+        return d;
+      });
+      await gs("apiDeletePurchase", id);
+      toast("Purchase deleted");
+    },
+    savePayment: async (pm) => {
+      const res = await gs("apiSavePayment", JSON.stringify(pm));
+      mutate((d) => {
+        const i = d.payments.findIndex((x) => x.id === res.record.id);
+        i >= 0 ? d.payments[i] = res.record : d.payments.push(res.record);
+        return d;
+      });
+      toast("Payment recorded");
+      return res.record;
+    },
+    saveBulkPayment: async (payload) => {
+      const res = await gs("apiSaveBulkPayment", JSON.stringify(payload));
+      mutate((d) => {
+        d.payments = d.payments.concat(res.records);
+        return d;
+      });
+      toast(`${res.records.length} payment${res.records.length === 1 ? "" : "s"} recorded`);
+      return res.records;
+    },
+    deletePayment: async (id) => {
+      mutate((d) => {
+        d.payments = d.payments.filter((x) => x.id !== id);
+        return d;
+      });
+      await gs("apiDeletePayment", id);
+      toast("Payment deleted");
+    },
+    saveSettings: async (s) => {
+      mutate((d) => {
+        d.settings = s;
+        return d;
+      });
+      await gs("apiSaveSettings", JSON.stringify(s));
+      toast("Settings saved");
+    }
+  }), []);
+  const go = (p, props = {}) => {
+    setPage(p);
+    setPageProps(props);
+    setMenuOpen(false);
+    window.scrollTo(0, 0);
+  };
+  if (error) return /* @__PURE__ */ React.createElement("div", { className: "min-h-screen flex items-center justify-center p-6" }, /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-2xl border border-red-900/40 p-8 max-w-md text-center" }, /* @__PURE__ */ React.createElement("div", { className: "text-3xl mb-2" }, "\u26A0\uFE0F"), /* @__PURE__ */ React.createElement("h2", { className: "font-bold text-zinc-100 mb-1" }, "Could not load data"), /* @__PURE__ */ React.createElement("p", { className: "text-sm text-zinc-400 mb-4" }, error), /* @__PURE__ */ React.createElement(Btn, { onClick: () => {
+    setError(null);
+    load();
+  } }, "Retry")));
+  if (!db || !derived) return /* @__PURE__ */ React.createElement("div", { className: "min-h-screen flex flex-col items-center justify-center gap-3" }, /* @__PURE__ */ React.createElement("div", { className: "w-12 h-12 rounded-2xl bg-red-600 text-white flex items-center justify-center font-extrabold text-lg shadow-lg" }, "XL"), /* @__PURE__ */ React.createElement("div", { className: "text-sm text-zinc-400 font-medium animate-pulse" }, "Loading your business data\u2026"));
+  const isOwner = db.currentUser && db.currentUser.role === "Owner";
+  const ctx = { db, derived, actions, go, S: db.settings, isOwner };
+  const pages = {
+    "dashboard": /* @__PURE__ */ React.createElement(Dashboard, { ...ctx }),
+    "new-sale": /* @__PURE__ */ React.createElement(NewSale, { ...ctx, ...pageProps, key: pageProps.editId || pageProps.convertFrom && pageProps.convertFrom.id || "new" }),
+    "sales": /* @__PURE__ */ React.createElement(SalesList, { ...ctx, ...pageProps }),
+    "payments": /* @__PURE__ */ React.createElement(PaymentsPage, { ...ctx, ...pageProps }),
+    "bulk-payment": /* @__PURE__ */ React.createElement(BulkPaymentPage, { ...ctx }),
+    "followups": /* @__PURE__ */ React.createElement(FollowupsPage, { ...ctx }),
+    "new-purchase": /* @__PURE__ */ React.createElement(NewPurchase, { ...ctx, ...pageProps, key: pageProps.editId || "newp" }),
+    "purchases": /* @__PURE__ */ React.createElement(PurchaseList, { ...ctx }),
+    "purchase-returns": /* @__PURE__ */ React.createElement(PurchaseReturnsList, { ...ctx }),
+    "new-purchase-return": /* @__PURE__ */ React.createElement(NewPurchaseReturn, { ...ctx, ...pageProps, key: pageProps.purchaseId || "new-pr" }),
+    "items": /* @__PURE__ */ React.createElement(ItemsPage, { ...ctx }),
+    "parties": /* @__PURE__ */ React.createElement(PartiesPage, { ...ctx }),
+    "party-detail": /* @__PURE__ */ React.createElement(PartyDetail, { ...ctx, ...pageProps, key: pageProps.partyId || "party" }),
+    "opening-bills": /* @__PURE__ */ React.createElement(OpeningBillsPage, { ...ctx }),
+    "quotations": /* @__PURE__ */ React.createElement(QuotationsList, { ...ctx }),
+    "new-quotation": /* @__PURE__ */ React.createElement(SalesDocForm, { ...ctx, ...pageProps, docType: "quotation", key: pageProps.editId || pageProps.convertFrom && pageProps.convertFrom.id || "new-quo" }),
+    "sales-orders": /* @__PURE__ */ React.createElement(SalesOrdersList, { ...ctx }),
+    "new-sales-order": /* @__PURE__ */ React.createElement(SalesDocForm, { ...ctx, ...pageProps, docType: "salesOrder", key: pageProps.editId || pageProps.convertFrom && pageProps.convertFrom.id || "new-so" }),
+    "sales-returns": /* @__PURE__ */ React.createElement(SalesReturnsList, { ...ctx }),
+    "new-sales-return": /* @__PURE__ */ React.createElement(NewSalesReturn, { ...ctx, ...pageProps, key: pageProps.invoiceId || "new-sr" }),
+    "reports": /* @__PURE__ */ React.createElement(ReportsPage, { ...ctx }),
+    "settings": /* @__PURE__ */ React.createElement(SettingsPage, { ...ctx }),
+    "admin": /* @__PURE__ */ React.createElement(AdminPage, { ...ctx })
+  };
+  return /* @__PURE__ */ React.createElement("div", { className: "min-h-screen bg-zinc-950" }, /* @__PURE__ */ React.createElement("aside", { className: `fixed inset-y-0 left-0 w-60 bg-zinc-900 border-r border-zinc-800 z-[300] transform transition-transform md:translate-x-0 ${menuOpen ? "translate-x-0" : "-translate-x-full"}` }, /* @__PURE__ */ React.createElement("div", { className: "px-4 py-4 border-b border-zinc-800 flex items-center gap-3" }, /* @__PURE__ */ React.createElement("div", { className: "w-10 h-10 rounded-xl bg-red-600 text-white flex items-center justify-center font-extrabold shadow" }, "XL"), /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("div", { className: "font-extrabold text-zinc-100 leading-tight" }, db.settings.bizName), /* @__PURE__ */ React.createElement("div", { className: "text-[10px] text-zinc-500 font-medium" }, "ERP \xB7 ", IS_GAS ? "Google Sheets" : "Local preview"))), /* @__PURE__ */ React.createElement("nav", { className: "py-2 overflow-y-auto" }, NAV.map((sec) => {
+    const visItems = sec.items.filter((it) => !it.ownerOnly || isOwner);
+    return visItems.length === 0 ? null : /* @__PURE__ */ React.createElement("div", { key: sec.sec, className: "mb-1" }, /* @__PURE__ */ React.createElement("div", { className: "px-4 pt-3 pb-1 text-[10px] font-bold tracking-widest text-zinc-600" }, sec.sec), visItems.map((it) => /* @__PURE__ */ React.createElement(
+      "button",
+      {
+        key: it.id,
+        onClick: () => go(it.id),
+        className: `w-full flex items-center gap-2.5 px-4 py-2 text-[13px] font-medium border-l-[3px] transition ${page === it.id ? "border-red-500 bg-red-950/40 text-red-400" : "border-transparent text-zinc-400 hover:bg-zinc-800/60"}`
+      },
+      /* @__PURE__ */ React.createElement("span", { className: "w-5 text-center" }, it.icon),
+      it.label
+    )));
+  }), /* @__PURE__ */ React.createElement("div", { className: "mt-4 mx-4 pt-3 border-t border-zinc-800 text-[11px] text-zinc-500" }, /* @__PURE__ */ React.createElement("div", { className: "truncate", title: db.currentUser && db.currentUser.email }, db.currentUser && db.currentUser.email), /* @__PURE__ */ React.createElement("span", { className: `inline-block mt-1 px-2 py-0.5 rounded-full text-[10px] font-bold ${isOwner ? "bg-red-950/50 text-red-400" : "bg-zinc-800 text-zinc-400"}` }, db.currentUser && db.currentUser.role)))), menuOpen && /* @__PURE__ */ React.createElement("div", { className: "fixed inset-0 bg-black/60 z-[290] md:hidden", onClick: () => setMenuOpen(false) }), /* @__PURE__ */ React.createElement("main", { className: "md:ml-60 pb-20 md:pb-8" }, /* @__PURE__ */ React.createElement("div", { className: "md:hidden sticky top-0 z-[200] bg-zinc-900 border-b border-zinc-800 px-4 py-3 flex items-center justify-between" }, /* @__PURE__ */ React.createElement("button", { onClick: () => setMenuOpen(true), className: "text-xl text-zinc-100" }, "\u2630"), /* @__PURE__ */ React.createElement("div", { className: "font-extrabold text-zinc-100" }, db.settings.bizName), /* @__PURE__ */ React.createElement("button", { onClick: () => go("new-sale"), className: "w-8 h-8 rounded-lg bg-red-600 text-white font-bold" }, "+")), /* @__PURE__ */ React.createElement("div", { className: "p-4 md:p-6 max-w-6xl mx-auto" }, pages[page])), /* @__PURE__ */ React.createElement("nav", { className: "md:hidden fixed bottom-0 inset-x-0 bg-zinc-900 border-t border-zinc-800 z-[250] grid grid-cols-5" }, MOBILE_NAV.map((id) => {
+    const it = NAV.flatMap((s) => s.items).find((x) => x.id === id);
+    return /* @__PURE__ */ React.createElement("button", { key: id, onClick: () => go(id), className: `py-2 flex flex-col items-center gap-0.5 text-[10px] font-semibold ${page === id ? "text-red-400" : "text-zinc-500"}` }, /* @__PURE__ */ React.createElement("span", { className: "text-base" }, it.icon), it.label.split(" ")[0]);
+  })), /* @__PURE__ */ React.createElement(ToastHost, null), paletteOpen && /* @__PURE__ */ React.createElement(CommandPalette, { db, go, isOwner, onClose: () => setPaletteOpen(false) }), shortcutsOpen && /* @__PURE__ */ React.createElement(ShortcutSheet, { onClose: () => setShortcutsOpen(false) }));
+}
+function PageHead({ title, sub, right }) {
+  return /* @__PURE__ */ React.createElement("div", { className: "flex flex-wrap items-center justify-between gap-3 mb-4" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("h1", { className: "text-lg md:text-xl font-extrabold text-zinc-100" }, title), sub && /* @__PURE__ */ React.createElement("p", { className: "text-xs text-zinc-500 mt-0.5" }, sub)), /* @__PURE__ */ React.createElement("div", { className: "flex gap-2 flex-wrap" }, right));
+}
+function Dashboard({ db, derived, go, S }) {
+  const cur = S.currency;
+  const tk = today(), mk = monthKey(tk);
+  const stats = useMemo(() => {
+    let todaySales = 0, monthSales = 0, monthPur = 0, receivable = 0, payable = 0, cashIn = 0;
+    db.invoices.forEach((i) => {
+      if (String(i.date).slice(0, 10) === tk) todaySales += n2(i.total);
+      if (monthKey(i.date) === mk) monthSales += n2(i.total);
+    });
+    db.purchases.forEach((p) => {
+      if (monthKey(p.date) === mk) monthPur += n2(p.total);
+    });
+    db.payments.forEach((pm) => {
+      if (String(pm.date).slice(0, 10) === tk && pm.direction === "In") cashIn += n2(pm.amount);
+    });
+    Object.entries(derived.partyBalance).forEach(([id, b]) => {
+      if (b > 0.01) receivable += b;
+      if (b < -0.01) payable += -b;
+    });
+    const lowStock = db.items.filter((i) => i.active !== false && n2(i.minStock) > 0 && n2(i.stock) <= n2(i.minStock));
+    const pendingDispatch = db.invoices.filter((i) => (i.dispatchStatus || "Pending") === "Pending");
+    // Deliberately narrower than the Outstanding report: a Credit sale with dues is
+    // normal and already tracked there. This card is specifically the anomaly — goods
+    // already gone out, cash terms, still unpaid — which is harder to collect than a
+    // normal receivable and deserves separate, more urgent visibility.
+    const cashRisk = db.invoices.filter((i) => i.billType === "Cash" && i.dispatchStatus === "Dispatched" && n2(i.total) - (derived.paidByRef[i.id] || 0) > 0.01);
+    const followupsDue = db.followups.filter((f) => f.status !== "Done" && f.dueDate <= tk).sort((a, b) => String(a.dueDate).localeCompare(String(b.dueDate)));
+    return { todaySales, monthSales, monthPur, receivable, payable, cashIn, lowStock, pendingDispatch, cashRisk, followupsDue };
+  }, [db, derived]);
+  const recentInv = [...db.invoices].sort((a, b) => String(b.createdAt || b.date).localeCompare(String(a.createdAt || a.date))).slice(0, 6);
+  return /* @__PURE__ */ React.createElement("div", { className: "anim-in" }, /* @__PURE__ */ React.createElement(PageHead, { title: "Dashboard", sub: fdate(tk), right: /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement(Btn, { kind: "brand", onClick: () => go("new-sale") }, "+ New Sale"), /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", onClick: () => go("new-purchase") }, "+ Purchase")) }), /* @__PURE__ */ React.createElement("div", { className: "grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 mb-5" }, /* @__PURE__ */ React.createElement(StatCard, { label: "Today's Sales", value: fmt(stats.todaySales, cur), tone: "green" }), /* @__PURE__ */ React.createElement(StatCard, { label: "Cash In Today", value: fmt(stats.cashIn, cur), tone: "blue" }), /* @__PURE__ */ React.createElement(StatCard, { label: "This Month Sales", value: fmt(stats.monthSales, cur) }), /* @__PURE__ */ React.createElement(StatCard, { label: "This Month Purchase", value: fmt(stats.monthPur, cur) }), /* @__PURE__ */ React.createElement(StatCard, { label: "To Receive", value: fmt(stats.receivable, cur), tone: "amber", sub: "from customers" }), /* @__PURE__ */ React.createElement(StatCard, { label: "To Pay", value: fmt(stats.payable, cur), tone: "red", sub: "to suppliers" })), S.lowStockAlert && stats.lowStock.length > 0 && /* @__PURE__ */ React.createElement("div", { className: "mb-5 bg-amber-950/30 border border-amber-900/50 rounded-xl p-4" }, /* @__PURE__ */ React.createElement("div", { className: "text-sm font-bold text-amber-400 mb-1.5" }, "\u26A0\uFE0F Low stock \u2014 ", stats.lowStock.length, " item", stats.lowStock.length > 1 ? "s" : ""), /* @__PURE__ */ React.createElement("div", { className: "flex flex-wrap gap-2" }, stats.lowStock.slice(0, 8).map((i) => /* @__PURE__ */ React.createElement("span", { key: i.id, className: "text-xs bg-amber-950/40 border border-amber-800 rounded-full px-2.5 py-1 text-amber-400" }, i.name, " \xB7 ", /* @__PURE__ */ React.createElement("b", { className: "num" }, fq(i.stock)), " ", i.unit)), stats.lowStock.length > 8 && /* @__PURE__ */ React.createElement("button", { className: "text-xs text-amber-400 underline", onClick: () => go("items") }, "view all"))), (stats.pendingDispatch.length > 0 || stats.cashRisk.length > 0) && /* @__PURE__ */ React.createElement("div", { className: "grid md:grid-cols-2 gap-4 mb-5" }, stats.pendingDispatch.length > 0 && /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800 p-4" }, /* @__PURE__ */ React.createElement("div", { className: "flex items-center justify-between mb-2" }, /* @__PURE__ */ React.createElement("h3", { className: "font-bold text-sm text-zinc-100" }, "\u{1F69A} Goods Pending Dispatch \u2014 ", stats.pendingDispatch.length), /* @__PURE__ */ React.createElement("button", { className: "text-xs font-semibold text-red-400", onClick: () => go("sales", { pill: "pending-dispatch" }) }, "View all \u2192")), stats.pendingDispatch.slice(0, 4).map((inv) => /* @__PURE__ */ React.createElement("div", { key: inv.id, className: "flex items-center justify-between py-1.5 text-sm border-b border-zinc-800 last:border-0" }, /* @__PURE__ */ React.createElement("span", { className: "text-zinc-300" }, inv.invNo, " \xB7 ", inv.partyName), /* @__PURE__ */ React.createElement("span", { className: "num font-semibold text-zinc-400" }, fmt(inv.total, cur))))), stats.cashRisk.length > 0 && /* @__PURE__ */ React.createElement("div", { className: "bg-red-950/30 rounded-xl border border-red-900/50 p-4" }, /* @__PURE__ */ React.createElement("div", { className: "flex items-center justify-between mb-2" }, /* @__PURE__ */ React.createElement("h3", { className: "font-bold text-sm text-red-400" }, "\u26A0\uFE0F Cash Sales \u2014 Payment Not Received \u2014 ", stats.cashRisk.length), /* @__PURE__ */ React.createElement("button", { className: "text-xs font-semibold text-red-400", onClick: () => go("sales") }, "View \u2192")), /* @__PURE__ */ React.createElement("p", { className: "text-[11px] text-red-400/80 mb-2" }, "Goods already dispatched on cash terms, still unpaid \u2014 harder to collect than a normal credit sale."), stats.cashRisk.slice(0, 4).map((inv) => /* @__PURE__ */ React.createElement("div", { key: inv.id, className: "flex items-center justify-between py-1.5 text-sm border-b border-red-900/40 last:border-0" }, /* @__PURE__ */ React.createElement("span", { className: "text-red-200" }, inv.invNo, " \xB7 ", inv.partyName), /* @__PURE__ */ React.createElement("span", { className: "num font-bold text-red-400" }, fmt(n2(inv.total) - (derived.paidByRef[inv.id] || 0), cur)))))), stats.followupsDue.length > 0 && /* @__PURE__ */ React.createElement("div", { className: "mb-5 bg-zinc-900 rounded-xl border border-zinc-800 p-4" }, /* @__PURE__ */ React.createElement("div", { className: "flex items-center justify-between mb-2" }, /* @__PURE__ */ React.createElement("h3", { className: "font-bold text-sm text-zinc-100" }, "\u{1F4C5} Follow-ups Due — ", stats.followupsDue.length), /* @__PURE__ */ React.createElement("button", { className: "text-xs font-semibold text-red-400", onClick: () => go("followups") }, "View all →")), stats.followupsDue.slice(0, 5).map((f) => /* @__PURE__ */ React.createElement("div", { key: f.id, className: "flex items-center justify-between py-1.5 text-sm border-b border-zinc-800 last:border-0" }, /* @__PURE__ */ React.createElement("span", { className: "text-zinc-300" }, f.partyName, " \xB7 ", f.note), /* @__PURE__ */ React.createElement("span", { className: `text-xs font-semibold ${f.dueDate < tk ? "text-red-400" : "text-amber-400"}` }, f.dueDate < tk ? "Overdue" : "Today")))), /* @__PURE__ */ React.createElement("div", { className: "grid md:grid-cols-2 gap-4" }, /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800 p-4" }, /* @__PURE__ */ React.createElement("div", { className: "flex items-center justify-between mb-3" }, /* @__PURE__ */ React.createElement("h3", { className: "font-bold text-sm text-zinc-100" }, "Recent invoices"), /* @__PURE__ */ React.createElement("button", { className: "text-xs font-semibold text-red-400", onClick: () => go("sales") }, "View all \u2192")), recentInv.length === 0 ? /* @__PURE__ */ React.createElement(Empty, { icon: "\u{1F9FE}", msg: "No invoices yet. Create your first sale!", action: /* @__PURE__ */ React.createElement(Btn, { kind: "brand", size: "sm", onClick: () => go("new-sale") }, "New Sale") }) : recentInv.map((inv) => {
+    const paid = derived.paidByRef[inv.id] || 0;
+    const bal = n2(inv.total) - paid;
+    return /* @__PURE__ */ React.createElement("div", { key: inv.id, className: "flex items-center justify-between py-2 border-b border-zinc-800 last:border-0" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("div", { className: "text-sm font-semibold text-zinc-200" }, inv.partyName || "Cash Sale"), /* @__PURE__ */ React.createElement("div", { className: "text-[11px] text-zinc-500" }, inv.invNo, " \xB7 ", fdate(inv.date))), /* @__PURE__ */ React.createElement("div", { className: "text-right" }, /* @__PURE__ */ React.createElement("div", { className: "text-sm font-bold num" }, fmt(inv.total, cur)), /* @__PURE__ */ React.createElement("div", { className: `text-[11px] font-semibold ${bal <= 0.01 ? "text-emerald-400" : "text-amber-400"}` }, bal <= 0.01 ? "PAID" : "Due " + fmt(bal, cur))));
+  })), /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800 p-4" }, /* @__PURE__ */ React.createElement("h3", { className: "font-bold text-sm text-zinc-100 mb-3" }, "Quick actions"), /* @__PURE__ */ React.createElement("div", { className: "grid grid-cols-2 gap-2" }, [
+    ["\u{1F9FE}", "New Sale", "new-sale"],
+    ["\u{1F4E5}", "New Purchase", "new-purchase"],
+    ["\u{1F4B0}", "Receive Payment", "payments"],
+    ["\u{1F3F7}\uFE0F", "Add Item", "items"],
+    ["\u{1F465}", "Add Party", "parties"],
+    ["\u{1F4CA}", "P&L Report", "reports"]
+  ].map(([ic, lbl, pg]) => /* @__PURE__ */ React.createElement("button", { key: lbl, onClick: () => go(pg), className: "flex items-center gap-2.5 p-3 rounded-xl border border-zinc-800 hover:border-red-500/50 hover:bg-red-950/40 text-left transition" }, /* @__PURE__ */ React.createElement("span", { className: "text-lg" }, ic), /* @__PURE__ */ React.createElement("span", { className: "text-xs font-semibold text-zinc-300" }, lbl)))), /* @__PURE__ */ React.createElement("div", { className: "mt-4 pt-3 border-t border-zinc-800 text-[11px] text-zinc-500 leading-relaxed" }, /* @__PURE__ */ React.createElement("b", { className: "text-zinc-400" }, "Keyboard shortcuts on billing:"), " Enter = next field \xB7 Enter on Rate = new row \xB7 Ctrl+S = save \xB7 Esc = close popup"))));
+}
+const emptyLine = () => ({ key: uid(), itemId: "", name: "", brand: "", packing: "", packs: "", qty: "", rate: "", cost: 0 });
+function NewSale({ db, derived, actions, go, S, editId, convertFrom }) {
+  const cur = S.currency;
+  const editing = editId ? db.invoices.find((i) => i.id === editId) : null;
+  const editLines = editing ? derived.linesByInvoice[editId] || [] : [];
+  const convertLines = convertFrom ? convertFrom.lines.map((l) => ({ key: uid(), itemId: l.itemId, name: l.name, brand: l.brand, packing: l.packing, packs: l.packs, qty: l.qty, rate: l.rate, cost: n2(l.cost) })) : null;
+  const [date, setDate] = useState(editing ? String(editing.date).slice(0, 10) : today());
+  const [partyName, setPartyName] = useState(editing ? editing.partyName : convertFrom ? convertFrom.doc.partyName : "");
+  const [partyId, setPartyId] = useState(editing ? editing.partyId : convertFrom ? convertFrom.doc.partyId : "");
+  const [lines, setLines] = useState(editing ? editLines.map((l) => ({ key: uid(), itemId: l.itemId, name: l.name, brand: l.brand, packing: l.packing, packs: l.packs, qty: l.qty, rate: l.rate, cost: n2(l.cost) })) : convertLines || [emptyLine(), emptyLine(), emptyLine()]);
+  const [discount, setDiscount] = useState(editing ? n2(editing.discount) : convertFrom ? n2(convertFrom.doc.discount) : 0);
+  const [taxOn, setTaxOn] = useState(editing ? n2(editing.taxPct) > 0 : convertFrom ? n2(convertFrom.doc.taxPct) > 0 : !!S.taxEnabled);
+  const [received, setReceived] = useState("");
+  const [payMode, setPayMode] = useState(S.payModes[0] || "Cash");
+  const [billType, setBillType] = useState(editing ? editing.billType || "Cash" : "Cash");
+  const [notes, setNotes] = useState(editing ? editing.notes || "" : "");
+  const [saving, setSaving] = useState(false);
+  const [savedInfo, setSavedInfo] = useState(null);
+  const flow = ["name", "brand", "packing", "packs", "qty", "rate"];
+  const { setCellRef, focusCell, onCellKey, onArrow } = useGridNav(flow);
+  const lastRates = useMemo(() => {
+    if (!partyId) return {};
+    const invs = db.invoices.filter((i) => i.partyId === partyId).sort((a, b) => String(b.date).localeCompare(String(a.date)));
+    const map = {};
+    invs.forEach((inv) => (derived.linesByInvoice[inv.id] || []).forEach((l) => {
+      const k = clamp(l.name);
+      if (!map[k]) map[k] = { rate: n2(l.rate), date: inv.date };
+    }));
+    return map;
+  }, [partyId, db.invoices, derived]);
+  const itemOptions = useMemo(() => db.items.filter((i) => i.active !== false).map((i) => ({
+    id: i.id,
+    label: i.name,
+    sub: i.brand,
+    item: i
+  })), [db.items]);
+  const partyOptions = useMemo(() => db.parties.filter((p) => p.type !== "Supplier").map((p) => ({
+    id: p.id,
+    label: p.name,
+    sub: p.phone,
+    party: p
+  })), [db.parties]);
+  const update = (key, patch) => setLines((ls) => ls.map((l) => l.key === key ? { ...l, ...patch } : l));
+  const removeLine = (key) => setLines((ls) => ls.length > 1 ? ls.filter((l) => l.key !== key) : ls);
+  const addLine = () => {
+    const nl = emptyLine();
+    setLines((ls) => [...ls, nl]);
+    return nl.key;
+  };
+  const lineAmt = (l) => n2(l.qty) * n2(l.rate);
+  const filled = lines.filter((l) => l.name.trim() && n2(l.qty) > 0);
+  const subTotal = filled.reduce((s, l) => s + lineAmt(l), 0);
+  const taxPct = taxOn ? n2(S.taxPct) : 0;
+  const taxable = Math.max(0, subTotal - n2(discount));
+  const taxAmt = taxable * taxPct / 100;
+  const total = taxable + taxAmt;
+  const totalCost = filled.reduce((s, l) => s + n2(l.cost) * n2(l.qty), 0);
+  const profit = taxable - totalCost;
+  const pickItem = (key, o) => {
+    const it = o.item;
+    const lr = lastRates[clamp(it.name)];
+    update(key, {
+      itemId: it.id,
+      name: it.name,
+      brand: it.brand || "",
+      packing: it.packSize || "",
+      cost: n2(it.purchaseRate),
+      rate: lr ? lr.rate : n2(it.saleRate) || ""
+    });
+    focusCell(key, "packs");
+  };
+  const quickCreateItem = async (key, name) => {
+    const rec = await actions.saveItem({ name, brand: "", category: "", unit: S.units[0] || "Pcs", packSize: "", saleRate: 0, purchaseRate: 0, stock: 0, minStock: 0, active: true });
+    update(key, { itemId: rec.id, name: rec.name });
+    focusCell(key, "brand");
+  };
+  const pickParty = (o) => {
+    setPartyId(o.id);
+    setPartyName(o.label);
+    focusFirstItem();
+  };
+  const quickCreateParty = async (name) => {
+    const rec = await actions.saveParty({ name, type: "Customer", phone: "", address: "", gstin: "", openingBalance: 0, notes: "" });
+    setPartyId(rec.id);
+    setPartyName(rec.name);
+    focusFirstItem();
+  };
+  const focusFirstItem = () => {
+    const first = lines[0];
+    if (first) focusCell(first.key, "name");
+  };
+  const setPacking = (key, v) => {
+    const l = lines.find((x) => x.key === key);
+    const packs = n2(l.packs);
+    update(key, { packing: v, qty: n2(v) > 0 && packs > 0 ? n2(v) * packs : l.qty });
+  };
+  const setPacks = (key, v) => {
+    const l = lines.find((x) => x.key === key);
+    const pk = n2(l.packing);
+    update(key, { packs: v, qty: pk > 0 && n2(v) > 0 ? pk * n2(v) : l.qty });
+  };
+  const save = async (andPrint) => {
+    if (!filled.length) {
+      toast("Add at least one item with quantity", "warn");
+      return;
+    }
+    if (!partyName.trim() && !partyId) {
+      toast("Select a customer (or type Cash Sale)", "warn");
+    }
+    setSaving(true);
+    try {
+      const invoice = {
+        id: editing ? editing.id : "",
+        invNo: editing ? editing.invNo : "",
+        date,
+        partyId,
+        partyName: partyName.trim() || "Cash Sale",
+        subTotal,
+        discount: n2(discount),
+        taxPct,
+        taxAmt,
+        total,
+        payMode,
+        billType,
+        status: "active",
+        notes,
+        createdAt: editing ? editing.createdAt : "",
+        dispatchStatus: editing ? editing.dispatchStatus : "Pending",
+        dispatchedAt: editing ? editing.dispatchedAt : ""
+      };
+      if (convertFrom) {
+        invoice.sourceType = convertFrom.sheet === "Quotations" ? "Quotation" : "SalesOrder";
+        invoice.sourceId = convertFrom.id;
+      }
+      const payload = {
+        invoice,
+        items: filled.map((l) => ({ itemId: l.itemId, name: l.name.trim(), brand: l.brand, packing: l.packing, packs: n2(l.packs), qty: n2(l.qty), rate: n2(l.rate), amount: lineAmt(l), cost: n2(l.cost) })),
+        payment: !editing && n2(received) > 0 ? { amount: n2(received), mode: payMode } : null,
+        _oldLines: editing ? editLines : []
+      };
+      const res = await actions.saveInvoice(payload);
+      if (convertFrom) await actions.markConverted(convertFrom.sheet, convertFrom.id);
+      if (andPrint) printInvoice(res.invoice, res.items, S, derived.partyMap[partyId]);
+      if (editing) {
+        toast(`Invoice ${res.invoice.invNo} saved \u2713`);
+        go("sales");
+      } else {
+        setSavedInfo({ invNo: res.invoice.invNo, total: res.invoice.total });
+      }
+    } catch (e) {
+      toast("Save failed: " + (e.message || e), "err");
+    }
+    setSaving(false);
+  };
+  const saveAndNew = () => {
+    setSavedInfo(null);
+    const newLines = [emptyLine(), emptyLine(), emptyLine()];
+    setDate(today());
+    setPartyName("");
+    setPartyId("");
+    setLines(newLines);
+    setDiscount(0);
+    setTaxOn(!!S.taxEnabled);
+    setReceived("");
+    setNotes("");
+    focusCell(newLines[0].key, "name");
+  };
+  useEffect(() => {
+    const h = (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
+        e.preventDefault();
+        save(false);
+      }
+    };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  });
+  const gridCols = "grid grid-cols-[34px_minmax(180px,2fr)_minmax(90px,1fr)_72px_64px_72px_90px_100px_34px] gap-1.5 items-center";
+  const cellCls = "w-full px-2 py-1.5 text-[13px] bg-zinc-800 border border-zinc-700 text-zinc-100 rounded-md focus:border-red-500 focus:ring-2 focus:ring-red-500/30 num";
+  return /* @__PURE__ */ React.createElement("div", { className: "anim-in" }, /* @__PURE__ */ React.createElement(PageHead, { title: editing ? `Edit ${editing.invNo}` : convertFrom ? `New Sale (from ${convertFrom.doc[convertFrom.sheet === "Quotations" ? "quoNo" : "soNo"]})` : "New Sale", sub: "Enter moves to next field \xB7 Ctrl+S saves", right: /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "sm", onClick: () => go("sales") }, "\u2190 Sales List") }), /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800 p-4 mb-3" }, /* @__PURE__ */ React.createElement("div", { className: "grid md:grid-cols-3 gap-3" }, /* @__PURE__ */ React.createElement(Field, { label: "Customer" }, /* @__PURE__ */ React.createElement(
+    AutoComplete,
+    {
+      value: partyName,
+      onChange: (v) => {
+        setPartyName(v);
+        setPartyId("");
+      },
+      options: partyOptions,
+      onPick: pickParty,
+      allowCreate: true,
+      onCreate: quickCreateParty,
+      placeholder: "Search or add customer\u2026",
+      render: (o) => {
+        const bal = derived.partyBalance[o.id] || 0;
+        return /* @__PURE__ */ React.createElement("div", { className: "flex justify-between gap-3" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("div", { className: "font-medium" }, o.label), o.sub && /* @__PURE__ */ React.createElement("div", { className: "text-[11px] text-zinc-500" }, o.sub)), Math.abs(bal) > 0.01 && /* @__PURE__ */ React.createElement("div", { className: `text-[11px] font-bold num self-center ${bal > 0 ? "text-amber-400" : "text-emerald-400"}` }, bal > 0 ? "Due " : "Adv ", fmt(Math.abs(bal), cur)));
+      }
+    }
+  )), /* @__PURE__ */ React.createElement(Field, { label: "Invoice date" }, /* @__PURE__ */ React.createElement(Input, { type: "date", value: date, onChange: (e) => setDate(e.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Notes" }, /* @__PURE__ */ React.createElement(Input, { value: notes, onChange: (e) => setNotes(e.target.value), placeholder: "Optional\u2026" }))), partyId && Math.abs(derived.partyBalance[partyId] || 0) > 0.01 && /* @__PURE__ */ React.createElement("div", { className: `mt-2 text-xs font-semibold ${derived.partyBalance[partyId] > 0 ? "text-amber-400" : "text-emerald-400"}` }, derived.partyBalance[partyId] > 0 ? `\u26A0 Previous outstanding: ${fmt(derived.partyBalance[partyId], cur)}` : `\u2713 Advance balance: ${fmt(-derived.partyBalance[partyId], cur)}`)), /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800 p-4 mb-3 overflow-x-auto" }, /* @__PURE__ */ React.createElement("div", { className: "min-w-[760px]" }, /* @__PURE__ */ React.createElement("div", { className: `${gridCols} pb-2 border-b border-zinc-800 mb-2 text-[10px] font-bold uppercase tracking-wide text-zinc-500` }, /* @__PURE__ */ React.createElement("div", null, "Sr"), /* @__PURE__ */ React.createElement("div", null, "Item Description"), /* @__PURE__ */ React.createElement("div", null, "Brand"), /* @__PURE__ */ React.createElement("div", { className: "text-center" }, "Packing"), /* @__PURE__ */ React.createElement("div", { className: "text-center" }, "Packs"), /* @__PURE__ */ React.createElement("div", { className: "text-center" }, "Qty"), /* @__PURE__ */ React.createElement("div", { className: "text-right" }, "Rate"), /* @__PURE__ */ React.createElement("div", { className: "text-right" }, "Amount"), /* @__PURE__ */ React.createElement("div", null)), lines.map((l, idx) => {
+    const item = derived.itemMap[l.itemId];
+    const lr = lastRates[clamp(l.name)];
+    const margin = n2(l.rate) > 0 && n2(l.cost) > 0 ? (n2(l.rate) - n2(l.cost)) / n2(l.rate) * 100 : null;
+    return /* @__PURE__ */ React.createElement("div", { key: l.key, className: "mb-1.5" }, /* @__PURE__ */ React.createElement("div", { className: gridCols }, /* @__PURE__ */ React.createElement("div", { className: "text-xs text-zinc-500 num text-center" }, idx + 1), /* @__PURE__ */ React.createElement(
+      AutoComplete,
+      {
+        value: l.name,
+        onChange: (v) => update(l.key, { name: v, itemId: "" }),
+        options: itemOptions,
+        onPick: (o) => pickItem(l.key, o),
+        allowCreate: true,
+        onCreate: (name) => quickCreateItem(l.key, name),
+        className: cellCls + " !text-left",
+        inputRef: setCellRef(l.key, "name"),
+        onEnterEmpty: (e) => onCellKey(e, l.key, "name", lines, addLine),
+        onArrow: onArrow(l.key, "name", lines),
+        placeholder: "Type item name\u2026",
+        render: (o) => /* @__PURE__ */ React.createElement("div", { className: "flex justify-between gap-2" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("span", { className: "font-medium" }, o.label), o.sub && /* @__PURE__ */ React.createElement("span", { className: "text-[11px] text-zinc-500 ml-1.5" }, o.sub)), /* @__PURE__ */ React.createElement("div", { className: "text-[11px] text-zinc-500 num self-center" }, "stk ", fq(o.item.stock)))
+      }
+    ), /* @__PURE__ */ React.createElement("input", { ref: setCellRef(l.key, "brand"), value: l.brand, onChange: (e) => update(l.key, { brand: e.target.value }), onKeyDown: (e) => onCellKey(e, l.key, "brand", lines, addLine), className: cellCls + " !text-left", placeholder: "Brand" }), /* @__PURE__ */ React.createElement("input", { ref: setCellRef(l.key, "packing"), value: l.packing, onChange: (e) => setPacking(l.key, e.target.value), onKeyDown: (e) => onCellKey(e, l.key, "packing", lines, addLine), className: cellCls + " text-center", placeholder: "Pack", inputMode: "decimal" }), /* @__PURE__ */ React.createElement("input", { ref: setCellRef(l.key, "packs"), value: l.packs, onChange: (e) => setPacks(l.key, e.target.value), onKeyDown: (e) => onCellKey(e, l.key, "packs", lines, addLine), className: cellCls + " text-center", placeholder: "0", inputMode: "decimal" }), /* @__PURE__ */ React.createElement("input", { ref: setCellRef(l.key, "qty"), value: l.qty, onChange: (e) => update(l.key, { qty: e.target.value }), onKeyDown: (e) => onCellKey(e, l.key, "qty", lines, addLine), className: cellCls + " text-center font-semibold", placeholder: "0", inputMode: "decimal" }), /* @__PURE__ */ React.createElement("input", { ref: setCellRef(l.key, "rate"), value: l.rate, onChange: (e) => update(l.key, { rate: e.target.value }), onKeyDown: (e) => onCellKey(e, l.key, "rate", lines, addLine), className: cellCls + " text-right", placeholder: "0.00", inputMode: "decimal" }), /* @__PURE__ */ React.createElement("div", { className: "text-right text-[13px] font-bold num pr-1" }, lineAmt(l) > 0 ? fq(lineAmt(l)) : "\u2014"), /* @__PURE__ */ React.createElement("button", { tabIndex: -1, onClick: () => removeLine(l.key), className: "w-7 h-7 rounded-md text-red-400 hover:bg-red-950/40 text-sm" }, "\u2715")), (lr || margin !== null || item && n2(item.stock) < n2(l.qty)) && /* @__PURE__ */ React.createElement("div", { className: "ml-[42px] mt-0.5 flex gap-3 text-[10.5px]" }, lr && /* @__PURE__ */ React.createElement("span", { className: "text-blue-400" }, "Last rate to this party: ", /* @__PURE__ */ React.createElement("b", { className: "num" }, fmt(lr.rate, cur)), " (", fdate(lr.date), ")"), margin !== null && /* @__PURE__ */ React.createElement("span", { className: margin < 0 ? "text-red-400 font-semibold" : "text-emerald-400" }, "Margin: ", /* @__PURE__ */ React.createElement("b", { className: "num" }, margin.toFixed(1), "%")), item && n2(l.qty) > n2(item.stock) && /* @__PURE__ */ React.createElement("span", { className: "text-amber-400 font-semibold" }, "\u26A0 Only ", fq(item.stock), " in stock")));
+  }), /* @__PURE__ */ React.createElement(Btn, { kind: "soft", size: "sm", className: "mt-2", onClick: () => {
+    const k = addLine();
+    focusCell(k, "name");
+  } }, "+ Add row"))), /* @__PURE__ */ React.createElement("div", { className: "grid md:grid-cols-2 gap-3" }, /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800 p-4" }, /* @__PURE__ */ React.createElement("div", { className: "flex items-center justify-between mb-3" }, /* @__PURE__ */ React.createElement("h3", { className: "text-xs font-bold uppercase tracking-wide text-zinc-500" }, "Payment"), /* @__PURE__ */ React.createElement("div", { className: "flex rounded-lg border border-zinc-700 overflow-hidden" }, ["Cash", "Credit"].map((bt) => /* @__PURE__ */ React.createElement("button", { key: bt, type: "button", onClick: () => setBillType(bt), className: `px-3 py-1 text-xs font-semibold transition ${billType === bt ? "bg-red-600 text-white" : "bg-zinc-800 text-zinc-400 hover:text-zinc-200"}` }, bt)))), /* @__PURE__ */ React.createElement("div", { className: "grid grid-cols-2 gap-3" }, /* @__PURE__ */ React.createElement(Field, { label: `Received now (${cur})` }, /* @__PURE__ */ React.createElement(Input, { value: received, onChange: (e) => setReceived(e.target.value), inputMode: "decimal", placeholder: "0", disabled: !!editing })), /* @__PURE__ */ React.createElement(Field, { label: "Mode" }, /* @__PURE__ */ React.createElement(Select, { value: payMode, onChange: (e) => setPayMode(e.target.value) }, S.payModes.map((m) => /* @__PURE__ */ React.createElement("option", { key: m }, m))))), /* @__PURE__ */ React.createElement("div", { className: "flex gap-2 mt-2" }, /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "xs", onClick: () => setReceived(String(total)) }, "Full ", fmt(total, cur)), /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "xs", onClick: () => setReceived("") }, "Credit (\u20B90)")), editing && /* @__PURE__ */ React.createElement("p", { className: "text-[11px] text-zinc-500 mt-2" }, "To add payments on an existing invoice, use the Payments page.")), /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800 p-4" }, /* @__PURE__ */ React.createElement("div", { className: "flex justify-between text-sm py-1 text-zinc-400" }, /* @__PURE__ */ React.createElement("span", null, "Sub total"), /* @__PURE__ */ React.createElement("b", { className: "num" }, fmt(subTotal, cur))), /* @__PURE__ */ React.createElement("div", { className: "flex justify-between items-center text-sm py-1 text-zinc-400" }, /* @__PURE__ */ React.createElement("span", null, "Discount"), /* @__PURE__ */ React.createElement("input", { value: discount, onChange: (e) => setDiscount(e.target.value), className: "w-24 px-2 py-1 text-right text-sm bg-zinc-800 border border-zinc-700 text-zinc-100 rounded-md focus:border-red-500 focus:ring-2 focus:ring-red-500/30 num", inputMode: "decimal" })), /* @__PURE__ */ React.createElement("div", { className: "flex justify-between items-center text-sm py-1 text-zinc-400" }, /* @__PURE__ */ React.createElement("label", { className: "flex items-center gap-1.5 cursor-pointer" }, /* @__PURE__ */ React.createElement("input", { type: "checkbox", checked: taxOn, onChange: (e) => setTaxOn(e.target.checked) }), " ", S.taxLabel, " ", S.taxPct, "%"), /* @__PURE__ */ React.createElement("b", { className: "num" }, fmt(taxAmt, cur))), /* @__PURE__ */ React.createElement("div", { className: "flex justify-between text-base py-2 mt-1 border-t border-zinc-800 font-extrabold text-zinc-100" }, /* @__PURE__ */ React.createElement("span", null, "TOTAL"), /* @__PURE__ */ React.createElement("span", { className: "num" }, fmt(total, cur))), totalCost > 0 && /* @__PURE__ */ React.createElement("div", { className: "flex justify-between text-[11px] text-zinc-500" }, /* @__PURE__ */ React.createElement("span", null, "Est. profit (before tax)"), /* @__PURE__ */ React.createElement("b", { className: `num ${profit < 0 ? "text-red-400" : "text-emerald-400"}` }, fmt(profit, cur))), n2(received) > 0 && n2(received) < total && /* @__PURE__ */ React.createElement("div", { className: "flex justify-between text-xs mt-1 text-amber-400 font-semibold" }, /* @__PURE__ */ React.createElement("span", null, "Balance due"), /* @__PURE__ */ React.createElement("span", { className: "num" }, fmt(total - n2(received), cur))), /* @__PURE__ */ React.createElement("div", { className: "grid grid-cols-2 gap-2 mt-4" }, /* @__PURE__ */ React.createElement(Btn, { kind: "brand", disabled: saving, onClick: () => save(false) }, saving ? "Saving\u2026" : editing ? "Update" : "Save", " ", /* @__PURE__ */ React.createElement("span", { className: "opacity-60 text-[10px] hidden md:inline" }, "Ctrl+S")), /* @__PURE__ */ React.createElement(Btn, { disabled: saving, onClick: () => save(true) }, "Save & Print")))), savedInfo && /* @__PURE__ */ React.createElement(SaveConfirmModal, { label: `Invoice ${savedInfo.invNo}`, amount: savedInfo.total, cur, onSaveNew: saveAndNew, onDone: () => { setSavedInfo(null); go("sales"); } }));
+}
+function SalesList({ db, derived, actions, go, S, pill: initPill }) {
+  const cur = S.currency;
+  const [q, setQ] = useState("");
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
+  const [pill, setPill] = useState(initPill || "all");
+  const [viewInv, setViewInv] = useState(null);
+  const [confirm, setConfirm] = useState(null);
+  const [dispatchModal, setDispatchModal] = useState(null);
+  const [pageN, setPageN] = useState(1);
+  const PER = 25;
+  const rows = useMemo(() => {
+    const tk = today(), mk = monthKey(tk);
+    let list = [...db.invoices].sort((a, b) => String(b.createdAt || b.date).localeCompare(String(a.createdAt || a.date)));
+    if (pill === "today") list = list.filter((i) => String(i.date).slice(0, 10) === tk);
+    if (pill === "month") list = list.filter((i) => monthKey(i.date) === mk);
+    if (pill === "due") list = list.filter((i) => n2(i.total) - (derived.paidByRef[i.id] || 0) > 0.01);
+    if (pill === "pending-dispatch") list = list.filter((i) => (i.dispatchStatus || "Pending") === "Pending");
+    if (from) list = list.filter((i) => String(i.date).slice(0, 10) >= from);
+    if (to) list = list.filter((i) => String(i.date).slice(0, 10) <= to);
+    if (q.trim()) {
+      const s = clamp(q);
+      list = list.filter((i) => clamp(i.partyName).includes(s) || clamp(i.invNo).includes(s));
+    }
+    return list;
+  }, [db.invoices, derived, q, from, to, pill]);
+  const pages = Math.max(1, Math.ceil(rows.length / PER));
+  const shown = rows.slice((pageN - 1) * PER, pageN * PER);
+  const totalShown = rows.reduce((s, i) => s + n2(i.total), 0);
+  const dueShown = rows.reduce((s, i) => s + Math.max(0, n2(i.total) - (derived.paidByRef[i.id] || 0)), 0);
+  useEffect(() => setPageN(1), [q, from, to, pill]);
+  return /* @__PURE__ */ React.createElement("div", { className: "anim-in" }, /* @__PURE__ */ React.createElement(PageHead, { title: "Sales List", sub: `${rows.length} invoices \xB7 Total ${fmt(totalShown, cur)} \xB7 Due ${fmt(dueShown, cur)}`, right: /* @__PURE__ */ React.createElement(Btn, { kind: "brand", onClick: () => go("new-sale") }, "+ New Sale") }), /* @__PURE__ */ React.createElement("div", { className: "flex flex-wrap gap-2 mb-3 items-center" }, [["all", "All"], ["today", "Today"], ["month", "This Month"], ["due", "Due Only"], ["pending-dispatch", "Pending Dispatch"]].map(([id, lbl]) => /* @__PURE__ */ React.createElement("button", { key: id, onClick: () => setPill(id), className: `px-3 py-1.5 rounded-full text-xs font-semibold border transition ${pill === id ? "bg-red-600 text-white border-red-600" : "bg-zinc-900 text-zinc-400 border-zinc-700 hover:border-zinc-600"}` }, lbl)), /* @__PURE__ */ React.createElement(Input, { type: "date", value: from, onChange: (e) => setFrom(e.target.value), className: "!w-auto" }), /* @__PURE__ */ React.createElement("span", { className: "text-xs text-zinc-500" }, "to"), /* @__PURE__ */ React.createElement(Input, { type: "date", value: to, onChange: (e) => setTo(e.target.value), className: "!w-auto" }), /* @__PURE__ */ React.createElement(Input, { value: q, onChange: (e) => setQ(e.target.value), placeholder: "\u{1F50D} Search party / invoice no\u2026", className: "!w-56" })), shown.length === 0 ? /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800" }, /* @__PURE__ */ React.createElement(Empty, { icon: "\u{1F9FE}", msg: "No invoices match.", action: /* @__PURE__ */ React.createElement(Btn, { kind: "brand", size: "sm", onClick: () => go("new-sale") }, "Create Sale") })) : /* @__PURE__ */ React.createElement(Table, { head: ["Invoice", "Date", "Party", { t: "Total", right: true }, { t: "Paid", right: true }, { t: "Balance", right: true }, "Status", "Dispatch", ""] }, shown.map((inv) => {
+    const paid = derived.paidByRef[inv.id] || 0;
+    const bal = n2(inv.total) - paid;
+    const dispatched = inv.dispatchStatus === "Dispatched";
+    return /* @__PURE__ */ React.createElement("tr", { key: inv.id, className: "hover:bg-zinc-800/60 cursor-pointer", onClick: () => setViewInv(inv) }, /* @__PURE__ */ React.createElement(Td, { className: "font-semibold text-zinc-200" }, inv.invNo), /* @__PURE__ */ React.createElement(Td, { className: "whitespace-nowrap text-zinc-400" }, fdate(inv.date)), /* @__PURE__ */ React.createElement(Td, null, inv.partyName), /* @__PURE__ */ React.createElement(Td, { right: true, className: "font-bold" }, fmt(inv.total, cur)), /* @__PURE__ */ React.createElement(Td, { right: true, className: "text-emerald-400" }, fmt(paid, cur)), /* @__PURE__ */ React.createElement(Td, { right: true, className: bal > 0.01 ? "text-amber-400 font-semibold" : "text-zinc-600" }, bal > 0.01 ? fmt(bal, cur) : "\u2014"), /* @__PURE__ */ React.createElement(Td, null, /* @__PURE__ */ React.createElement("span", { className: `px-2 py-0.5 rounded-full text-[10px] font-bold ${bal <= 0.01 ? "bg-emerald-950/50 text-emerald-400" : paid > 0 ? "bg-blue-950/50 text-blue-400" : "bg-amber-950/50 text-amber-400"}` }, bal <= 0.01 ? "PAID" : paid > 0 ? "PARTIAL" : "UNPAID")), /* @__PURE__ */ React.createElement(Td, { onClick: (e) => e.stopPropagation() }, /* @__PURE__ */ React.createElement("div", { className: "flex items-center gap-1.5" }, /* @__PURE__ */ React.createElement("span", { className: `px-2 py-0.5 rounded-full text-[10px] font-bold ${dispatched ? "bg-emerald-950/50 text-emerald-400" : "bg-zinc-800 text-zinc-400"}` }, dispatched ? "DISPATCHED" : "PENDING"), dispatched ? /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "xs", onClick: () => actions.markDispatch(inv.id, "Reverted") }, "Revert") : /* @__PURE__ */ React.createElement(Btn, { kind: "soft", size: "xs", onClick: () => setDispatchModal(inv) }, "Mark Dispatched"))), /* @__PURE__ */ React.createElement(Td, { onClick: (e) => e.stopPropagation() }, /* @__PURE__ */ React.createElement("div", { className: "flex gap-1 justify-end" }, /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "xs", onClick: () => printInvoice(inv, derived.linesByInvoice[inv.id] || [], S, derived.partyMap[inv.partyId]) }, "\u{1F5A8}"), /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "xs", onClick: () => go("new-sale", { editId: inv.id }) }, "\u270E"), /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "xs", className: "!text-red-400", onClick: () => setConfirm(inv) }, "\u{1F5D1}"))));
+  })), pages > 1 && /* @__PURE__ */ React.createElement("div", { className: "flex justify-center gap-1 mt-4" }, Array.from({ length: pages }, (_, i) => i + 1).map((p) => /* @__PURE__ */ React.createElement("button", { key: p, onClick: () => setPageN(p), className: `w-8 h-8 rounded-lg text-xs font-bold ${p === pageN ? "bg-red-600 text-white" : "bg-zinc-900 border border-zinc-800 text-zinc-400"}` }, p))), viewInv && /* @__PURE__ */ React.createElement(InvoiceView, { inv: viewInv, lines: derived.linesByInvoice[viewInv.id] || [], paid: derived.paidByRef[viewInv.id] || 0, S, derived, go, onClose: () => setViewInv(null) }), confirm && /* @__PURE__ */ React.createElement(Confirm, { msg: `Delete invoice ${confirm.invNo}? Stock will be restored and linked payments removed.`, onYes: () => actions.deleteInvoice(confirm.id), onClose: () => setConfirm(null) }), dispatchModal && /* @__PURE__ */ React.createElement(DispatchModal, { inv: dispatchModal, onConfirm: (details) => actions.markDispatch(dispatchModal.id, "Dispatched", details), onClose: () => setDispatchModal(null) }));
+}
+function DispatchModal({ inv, onConfirm, onClose }) {
+  const [vehicleNo, setVehicleNo] = useState("");
+  const [transporter, setTransporter] = useState("");
+  const [notes, setNotes] = useState("");
+  return /* @__PURE__ */ React.createElement(Modal, { title: `Mark ${inv.invNo} Dispatched`, onClose }, /* @__PURE__ */ React.createElement("div", { className: "space-y-3" }, /* @__PURE__ */ React.createElement(Field, { label: "Vehicle no (optional)" }, /* @__PURE__ */ React.createElement(Input, { value: vehicleNo, onChange: (e) => setVehicleNo(e.target.value), autoFocus: true })), /* @__PURE__ */ React.createElement(Field, { label: "Transporter (optional)" }, /* @__PURE__ */ React.createElement(Input, { value: transporter, onChange: (e) => setTransporter(e.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Notes (optional)" }, /* @__PURE__ */ React.createElement(Input, { value: notes, onChange: (e) => setNotes(e.target.value) })), /* @__PURE__ */ React.createElement("div", { className: "flex justify-end gap-2 pt-2" }, /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", onClick: onClose }, "Cancel"), /* @__PURE__ */ React.createElement(Btn, { kind: "brand", onClick: () => {
+    onConfirm({ vehicleNo, transporter, notes });
+    onClose();
+  } }, "Mark Dispatched"))));
+}
+function InvoiceView({ inv, lines, paid, S, derived, go, onClose }) {
+  const cur = S.currency;
+  const bal = n2(inv.total) - paid;
+  return /* @__PURE__ */ React.createElement(Modal, { title: `Invoice ${inv.invNo}`, onClose, wide: true }, /* @__PURE__ */ React.createElement("div", { className: "flex flex-wrap justify-between gap-3 mb-4" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("div", { className: "font-bold text-zinc-100" }, inv.partyName), /* @__PURE__ */ React.createElement("div", { className: "text-xs text-zinc-500" }, fdate(inv.date), " \xB7 ", inv.payMode)), /* @__PURE__ */ React.createElement("div", { className: "text-right" }, /* @__PURE__ */ React.createElement("div", { className: "text-lg font-extrabold num" }, fmt(inv.total, cur)), /* @__PURE__ */ React.createElement("div", { className: `text-xs font-bold ${bal <= 0.01 ? "text-emerald-400" : "text-amber-400"}` }, bal <= 0.01 ? "FULLY PAID" : `Due ${fmt(bal, cur)}`))), /* @__PURE__ */ React.createElement(Table, { head: ["#", "Item", "Brand", { t: "Packing", right: true }, { t: "Packs", right: true }, { t: "Qty", right: true }, { t: "Rate", right: true }, { t: "Amount", right: true }] }, lines.map((l, i) => /* @__PURE__ */ React.createElement("tr", { key: l.id }, /* @__PURE__ */ React.createElement(Td, null, i + 1), /* @__PURE__ */ React.createElement(Td, { className: "font-medium" }, l.name), /* @__PURE__ */ React.createElement(Td, { className: "text-zinc-400" }, l.brand || "\u2014"), /* @__PURE__ */ React.createElement(Td, { right: true }, l.packing || "\u2014"), /* @__PURE__ */ React.createElement(Td, { right: true }, n2(l.packs) || "\u2014"), /* @__PURE__ */ React.createElement(Td, { right: true, className: "font-semibold" }, fq(l.qty)), /* @__PURE__ */ React.createElement(Td, { right: true }, fmt(l.rate, cur)), /* @__PURE__ */ React.createElement(Td, { right: true, className: "font-bold" }, fmt(l.amount, cur))))), /* @__PURE__ */ React.createElement("div", { className: "mt-3 text-sm space-y-1 max-w-xs ml-auto" }, /* @__PURE__ */ React.createElement("div", { className: "flex justify-between text-zinc-400" }, /* @__PURE__ */ React.createElement("span", null, "Sub total"), /* @__PURE__ */ React.createElement("span", { className: "num" }, fmt(inv.subTotal, cur))), n2(inv.discount) > 0 && /* @__PURE__ */ React.createElement("div", { className: "flex justify-between text-zinc-400" }, /* @__PURE__ */ React.createElement("span", null, "Discount"), /* @__PURE__ */ React.createElement("span", { className: "num" }, "\u2212", fmt(inv.discount, cur))), n2(inv.taxAmt) > 0 && /* @__PURE__ */ React.createElement("div", { className: "flex justify-between text-zinc-400" }, /* @__PURE__ */ React.createElement("span", null, S.taxLabel, " ", inv.taxPct, "%"), /* @__PURE__ */ React.createElement("span", { className: "num" }, fmt(inv.taxAmt, cur))), /* @__PURE__ */ React.createElement("div", { className: "flex justify-between font-extrabold text-zinc-100 border-t border-zinc-800 pt-1" }, /* @__PURE__ */ React.createElement("span", null, "Total"), /* @__PURE__ */ React.createElement("span", { className: "num" }, fmt(inv.total, cur))), /* @__PURE__ */ React.createElement("div", { className: "flex justify-between text-emerald-400" }, /* @__PURE__ */ React.createElement("span", null, "Paid"), /* @__PURE__ */ React.createElement("span", { className: "num" }, fmt(paid, cur)))), /* @__PURE__ */ React.createElement("div", { className: "flex flex-wrap gap-2 justify-end mt-4" }, bal > 0.01 && /* @__PURE__ */ React.createElement(Btn, { kind: "soft", onClick: () => {
+    onClose();
+    go("payments", { prefillInvoice: inv });
+  } }, "Collect Payment"), /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", onClick: () => { onClose(); go("new-sales-return", { invoiceId: inv.id }); } }, "\u21A9\uFE0F Sales Return"), /* @__PURE__ */ React.createElement("a", { href: invoiceWhatsAppLink(inv, S, derived.partyMap[inv.partyId]), target: "_blank", rel: "noreferrer", className: "inline-flex items-center justify-center gap-1.5 rounded-lg font-semibold transition-colors px-4 py-2 text-sm bg-zinc-900 border border-zinc-700 text-zinc-200 hover:bg-zinc-800" }, "\u{1F4AC} WhatsApp"), /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", onClick: () => downloadInvoicePdf(inv, lines, S, derived.partyMap[inv.partyId]) }, "\u2B07\uFE0F PDF"), /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", onClick: () => printInvoice(inv, lines, S, derived.partyMap[inv.partyId]) }, "\u{1F5A8} Print"), /* @__PURE__ */ React.createElement(Btn, { onClick: () => {
+    onClose();
+    go("new-sale", { editId: inv.id });
+  } }, "Edit")));
+}
+/**
+ * Sales Return against an existing invoice (Module 4). Partial-line returns are the
+ * normal case, so each line caps at (originally invoiced qty − already returned qty)
+ * rather than a flat "return everything" toggle. Kept deliberately simple: a straight
+ * qty*rate refund per line, no re-derivation of the original invoice's discount/tax
+ * split — small businesses handle returns this way in practice, and the receivable
+ * reduction (via a Payments-sheet credit, see apiSaveSalesReturn) is what actually
+ * needs to be exact, not a proportional tax allocation nobody will check.
+ */
+function NewSalesReturn({ db, derived, actions, go, S, invoiceId }) {
+  const cur = S.currency;
+  const inv = db.invoices.find((i) => i.id === invoiceId);
+  const invLines = derived.linesByInvoice[invoiceId] || [];
+  const [qtys, setQtys] = useState({});
+  const [notes, setNotes] = useState("");
+  const [saving, setSaving] = useState(false);
+  if (!inv) {
+    return /* @__PURE__ */ React.createElement("div", { className: "anim-in" }, /* @__PURE__ */ React.createElement(PageHead, { title: "Invoice not found", right: /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "sm", onClick: () => go("sales") }, "← Sales List") }));
+  }
+  const rows = invLines.map((l) => {
+    const returned = derived.returnedQtyByInvoiceItem[l.id] || 0;
+    const remaining = Math.max(0, n2(l.qty) - returned);
+    const retQty = n2(qtys[l.id] || 0);
+    return { ...l, returned, remaining, retQty, amount: retQty * n2(l.rate) };
+  });
+  const total = rows.reduce((s, r) => s + r.amount, 0);
+  const setQty = (lineId, v, max) => {
+    const capped = v === "" ? "" : String(Math.min(Math.max(n2(v), 0), max));
+    setQtys((q) => ({ ...q, [lineId]: capped }));
+  };
+  const save = async () => {
+    const items = rows.filter((r) => r.retQty > 0).map((r) => ({ invoiceItemId: r.id, itemId: r.itemId, name: r.name, brand: r.brand, packing: r.packing, qty: r.retQty, rate: n2(r.rate), amount: r.amount }));
+    if (!items.length) {
+      toast("Enter a return quantity for at least one line", "warn");
+      return;
+    }
+    setSaving(true);
+    try {
+      await actions.saveSalesReturn({
+        salesReturn: { id: "", date: today(), partyId: inv.partyId, partyName: inv.partyName, subTotal: total, taxAmt: 0, total, notes, sourceType: "Invoice", sourceId: inv.id },
+        items
+      });
+      go("sales-returns");
+    } catch (e) {
+      toast("Save failed: " + (e.message || e), "err");
+    }
+    setSaving(false);
+  };
+  return /* @__PURE__ */ React.createElement("div", { className: "anim-in" }, /* @__PURE__ */ React.createElement(PageHead, { title: `Sales Return — ${inv.invNo}`, sub: `${inv.partyName} \xB7 ${fdate(inv.date)}`, right: /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "sm", onClick: () => go("sales") }, "← Sales List") }), /* @__PURE__ */ React.createElement(Table, { head: ["Item", { t: "Invoiced", right: true }, { t: "Returned", right: true }, { t: "Returnable", right: true }, { t: "Return Qty", right: true }, { t: "Amount", right: true }] }, rows.map((r) => /* @__PURE__ */ React.createElement("tr", { key: r.id }, /* @__PURE__ */ React.createElement(Td, { className: "font-medium" }, r.name, r.brand && /* @__PURE__ */ React.createElement("span", { className: "text-zinc-500" }, " (", r.brand, ")")), /* @__PURE__ */ React.createElement(Td, { right: true }, fq(r.qty)), /* @__PURE__ */ React.createElement(Td, { right: true, className: "text-zinc-500" }, r.returned > 0 ? fq(r.returned) : "—"), /* @__PURE__ */ React.createElement(Td, { right: true, className: r.remaining <= 0 ? "text-zinc-600" : "text-emerald-400" }, fq(r.remaining)), /* @__PURE__ */ React.createElement(Td, { right: true }, /* @__PURE__ */ React.createElement("input", { value: qtys[r.id] ?? "", onChange: (e) => setQty(r.id, e.target.value, r.remaining), disabled: r.remaining <= 0, inputMode: "decimal", className: "w-20 px-2 py-1 text-right text-sm bg-zinc-800 border border-zinc-700 text-zinc-100 rounded-md focus:border-red-500 focus:ring-2 focus:ring-red-500/30 num disabled:opacity-40", placeholder: "0" })), /* @__PURE__ */ React.createElement(Td, { right: true, className: "font-bold" }, r.amount > 0 ? fmt(r.amount, cur) : "—")))), /* @__PURE__ */ React.createElement("div", { className: "max-w-sm ml-auto bg-zinc-900 rounded-xl border border-zinc-800 p-4 mt-4" }, /* @__PURE__ */ React.createElement(Field, { label: "Notes" }, /* @__PURE__ */ React.createElement(Input, { value: notes, onChange: (e) => setNotes(e.target.value), placeholder: "Reason for return…" })), /* @__PURE__ */ React.createElement("div", { className: "flex justify-between text-base py-2 mt-3 border-t border-zinc-800 font-extrabold text-zinc-100" }, /* @__PURE__ */ React.createElement("span", null, "REFUND TOTAL"), /* @__PURE__ */ React.createElement("span", { className: "num" }, fmt(total, cur))), /* @__PURE__ */ React.createElement(Btn, { kind: "brand", className: "w-full mt-2", disabled: saving || total <= 0, onClick: save }, saving ? "Saving…" : "Save Sales Return")));
+}
+function SalesReturnsList({ db, derived, actions, go, S }) {
+  const cur = S.currency;
+  const [q, setQ] = useState("");
+  const [confirm, setConfirm] = useState(null);
+  const [view, setView] = useState(null);
+  const rows = useMemo(() => {
+    let list = [...db.salesReturns].sort((a, b) => String(b.createdAt || b.date).localeCompare(String(a.createdAt || a.date)));
+    if (q.trim()) {
+      const s = clamp(q);
+      list = list.filter((r) => clamp(r.partyName).includes(s) || clamp(r.srNo).includes(s));
+    }
+    return list;
+  }, [db.salesReturns, q]);
+  return /* @__PURE__ */ React.createElement("div", { className: "anim-in" }, /* @__PURE__ */ React.createElement(PageHead, { title: "Sales Returns", sub: `${rows.length} returns \xB7 Started from an invoice's "Sales Return" button` }), /* @__PURE__ */ React.createElement(Input, { value: q, onChange: (e) => setQ(e.target.value), placeholder: "🔍 Search party / return no…", className: "!w-64 mb-3" }), rows.length === 0 ? /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800" }, /* @__PURE__ */ React.createElement(Empty, { icon: "↩️", msg: "No sales returns yet. Open an invoice and click “Sales Return”." })) : /* @__PURE__ */ React.createElement(Table, { head: ["Return", "Date", "Party", { t: "Total", right: true }, ""] }, rows.map((r) => /* @__PURE__ */ React.createElement("tr", { key: r.id, className: "hover:bg-zinc-800/60 cursor-pointer", onClick: () => setView(r) }, /* @__PURE__ */ React.createElement(Td, { className: "font-semibold" }, r.srNo), /* @__PURE__ */ React.createElement(Td, { className: "text-zinc-400 whitespace-nowrap" }, fdate(r.date)), /* @__PURE__ */ React.createElement(Td, null, r.partyName), /* @__PURE__ */ React.createElement(Td, { right: true, className: "font-bold" }, fmt(r.total, cur)), /* @__PURE__ */ React.createElement(Td, { onClick: (e) => e.stopPropagation() }, /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "xs", className: "!text-red-400", onClick: () => setConfirm(r) }, "\u{1F5D1}"))))), view && /* @__PURE__ */ React.createElement(Modal, { title: `Sales Return ${view.srNo}`, onClose: () => setView(null), wide: true }, /* @__PURE__ */ React.createElement("div", { className: "mb-3" }, /* @__PURE__ */ React.createElement("b", null, view.partyName), " ", /* @__PURE__ */ React.createElement("span", { className: "text-xs text-zinc-500" }, "\xB7 ", fdate(view.date))), /* @__PURE__ */ React.createElement(Table, { head: ["#", "Item", { t: "Qty", right: true }, { t: "Rate", right: true }, { t: "Amount", right: true }] }, (derived.linesBySalesReturn[view.id] || []).map((l, i) => /* @__PURE__ */ React.createElement("tr", { key: l.id }, /* @__PURE__ */ React.createElement(Td, null, i + 1), /* @__PURE__ */ React.createElement(Td, { className: "font-medium" }, l.name), /* @__PURE__ */ React.createElement(Td, { right: true }, fq(l.qty)), /* @__PURE__ */ React.createElement(Td, { right: true }, fmt(l.rate, cur)), /* @__PURE__ */ React.createElement(Td, { right: true, className: "font-bold" }, fmt(l.amount, cur))))), /* @__PURE__ */ React.createElement("div", { className: "text-right mt-3 font-extrabold" }, "Refund total: ", /* @__PURE__ */ React.createElement("span", { className: "num" }, fmt(view.total, cur)))), confirm && /* @__PURE__ */ React.createElement(Confirm, { msg: `Delete return ${confirm.srNo}? Stock will be reversed and the customer's balance will go back up.`, onYes: () => actions.deleteSalesReturn(confirm.id), onClose: () => setConfirm(null) }));
+}
+const emptyPLine = () => ({ key: uid(), itemId: "", name: "", qty: "", rate: "" });
+function NewPurchase({ db, derived, actions, go, S, editId }) {
+  const cur = S.currency;
+  const editing = editId ? db.purchases.find((p) => p.id === editId) : null;
+  const editLines = editing ? derived.linesByPurchase[editId] || [] : [];
+  const [date, setDate] = useState(editing ? String(editing.date).slice(0, 10) : today());
+  const [partyName, setPartyName] = useState(editing ? editing.partyName : "");
+  const [partyId, setPartyId] = useState(editing ? editing.partyId : "");
+  const [lines, setLines] = useState(editing ? editLines.map((l) => ({ key: uid(), itemId: l.itemId, name: l.name, qty: l.qty, rate: l.rate })) : [emptyPLine(), emptyPLine()]);
+  const [other, setOther] = useState(editing ? n2(editing.other) : 0);
+  const [supplierInvoiceNo, setSupplierInvoiceNo] = useState(editing ? editing.supplierInvoiceNo || "" : "");
+  const [paidNow, setPaidNow] = useState("");
+  const [payMode, setPayMode] = useState(S.payModes[0] || "Cash");
+  const [notes, setNotes] = useState(editing ? editing.notes || "" : "");
+  const [saving, setSaving] = useState(false);
+  const [savedInfo, setSavedInfo] = useState(null);
+  const flow = ["name", "qty", "rate"];
+  const { setCellRef, focusCell, onCellKey: onKey, onArrow } = useGridNav(flow);
+  const itemOptions = useMemo(() => db.items.map((i) => ({ id: i.id, label: i.name, sub: i.brand, item: i })), [db.items]);
+  const supplierOptions = useMemo(() => db.parties.filter((p) => p.type !== "Customer").map((p) => ({ id: p.id, label: p.name, sub: p.phone })), [db.parties]);
+  const update = (key, patch) => setLines((ls) => ls.map((l) => l.key === key ? { ...l, ...patch } : l));
+  const removeLine = (key) => setLines((ls) => ls.length > 1 ? ls.filter((l) => l.key !== key) : ls);
+  const addLine = () => {
+    const nl = emptyPLine();
+    setLines((ls) => [...ls, nl]);
+    return nl.key;
+  };
+  const filled = lines.filter((l) => l.name.trim() && n2(l.qty) > 0);
+  const subTotal = filled.reduce((s, l) => s + n2(l.qty) * n2(l.rate), 0);
+  const total = subTotal + n2(other);
+  const quickCreateItem = async (key, name) => {
+    const rec = await actions.saveItem({ name, brand: "", category: "", unit: S.units[0] || "Pcs", packSize: "", saleRate: 0, purchaseRate: 0, stock: 0, minStock: 0, active: true });
+    update(key, { itemId: rec.id, name: rec.name });
+    focusCell(key, "qty");
+  };
+  const quickCreateSupplier = async (name) => {
+    const rec = await actions.saveParty({ name, type: "Supplier", phone: "", address: "", gstin: "", openingBalance: 0, notes: "" });
+    setPartyId(rec.id);
+    setPartyName(rec.name);
+  };
+  const save = async () => {
+    if (!filled.length) {
+      toast("Add at least one item", "warn");
+      return;
+    }
+    setSaving(true);
+    try {
+      const payload = {
+        purchase: {
+          id: editing ? editing.id : "",
+          billNo: editing ? editing.billNo : "",
+          date,
+          partyId,
+          partyName: partyName.trim() || "Cash Purchase",
+          subTotal,
+          other: n2(other),
+          total,
+          payMode,
+          supplierInvoiceNo: supplierInvoiceNo.trim(),
+          notes,
+          createdAt: editing ? editing.createdAt : ""
+        },
+        items: filled.map((l) => ({ itemId: l.itemId, name: l.name.trim(), qty: n2(l.qty), rate: n2(l.rate), amount: n2(l.qty) * n2(l.rate) })),
+        payment: !editing && n2(paidNow) > 0 ? { amount: n2(paidNow), mode: payMode } : null,
+        _oldLines: editing ? editLines : []
+      };
+      const res = await actions.savePurchase(payload);
+      if (editing) {
+        toast(`Purchase ${res.purchase.billNo} saved \u2713 Stock updated`);
+        go("purchases");
+      } else {
+        setSavedInfo({ billNo: res.purchase.billNo, total: res.purchase.total });
+      }
+    } catch (e) {
+      toast("Save failed: " + (e.message || e), "err");
+    }
+    setSaving(false);
+  };
+  const saveAndNew = () => {
+    setSavedInfo(null);
+    const newLines = [emptyPLine(), emptyPLine()];
+    setDate(today());
+    setPartyName("");
+    setPartyId("");
+    setLines(newLines);
+    setOther(0);
+    setSupplierInvoiceNo("");
+    setPaidNow("");
+    setNotes("");
+    focusCell(newLines[0].key, "name");
+  };
+  const cellCls = "w-full px-2 py-1.5 text-[13px] bg-zinc-800 border border-zinc-700 text-zinc-100 rounded-md focus:border-red-500 focus:ring-2 focus:ring-red-500/30";
+  const gridCols = "grid grid-cols-[34px_minmax(200px,2fr)_84px_100px_110px_34px] gap-1.5 items-center";
+  return /* @__PURE__ */ React.createElement("div", { className: "anim-in" }, /* @__PURE__ */ React.createElement(PageHead, { title: editing ? `Edit ${editing.billNo}` : "New Purchase", sub: "Stock IN \u2014 item cost auto-updates to last purchase rate", right: /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "sm", onClick: () => go("purchases") }, "\u2190 Purchase List") }), /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800 p-4 mb-3 grid md:grid-cols-4 gap-3" }, /* @__PURE__ */ React.createElement(Field, { label: "Supplier" }, /* @__PURE__ */ React.createElement(
+    AutoComplete,
+    {
+      value: partyName,
+      onChange: (v) => {
+        setPartyName(v);
+        setPartyId("");
+      },
+      options: supplierOptions,
+      onPick: (o) => {
+        setPartyId(o.id);
+        setPartyName(o.label);
+      },
+      allowCreate: true,
+      onCreate: quickCreateSupplier,
+      placeholder: "Search or add supplier\u2026"
+    }
+  )), /* @__PURE__ */ React.createElement(Field, { label: "Bill date" }, /* @__PURE__ */ React.createElement(Input, { type: "date", value: date, onChange: (e) => setDate(e.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Supplier invoice no" }, /* @__PURE__ */ React.createElement(Input, { value: supplierInvoiceNo, onChange: (e) => setSupplierInvoiceNo(e.target.value), placeholder: "Their bill/invoice no\u2026" })), /* @__PURE__ */ React.createElement(Field, { label: "Notes" }, /* @__PURE__ */ React.createElement(Input, { value: notes, onChange: (e) => setNotes(e.target.value), placeholder: "Transport, remarks\u2026" }))), /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800 p-4 mb-3 overflow-x-auto" }, /* @__PURE__ */ React.createElement("div", { className: "min-w-[600px]" }, /* @__PURE__ */ React.createElement("div", { className: `${gridCols} pb-2 border-b border-zinc-800 mb-2 text-[10px] font-bold uppercase tracking-wide text-zinc-500` }, /* @__PURE__ */ React.createElement("div", null, "Sr"), /* @__PURE__ */ React.createElement("div", null, "Item"), /* @__PURE__ */ React.createElement("div", { className: "text-center" }, "Qty"), /* @__PURE__ */ React.createElement("div", { className: "text-right" }, "Rate"), /* @__PURE__ */ React.createElement("div", { className: "text-right" }, "Amount"), /* @__PURE__ */ React.createElement("div", null)), lines.map((l, idx) => {
+    const item = derived.itemMap[l.itemId];
+    return /* @__PURE__ */ React.createElement("div", { key: l.key, className: `${gridCols} mb-1.5` }, /* @__PURE__ */ React.createElement("div", { className: "text-xs text-zinc-500 num text-center" }, idx + 1), /* @__PURE__ */ React.createElement(
+      AutoComplete,
+      {
+        value: l.name,
+        onChange: (v) => update(l.key, { name: v, itemId: "" }),
+        options: itemOptions,
+        onPick: (o) => {
+          update(l.key, { itemId: o.id, name: o.label, rate: n2(o.item.purchaseRate) || "" });
+          focusCell(l.key, "qty");
+        },
+        allowCreate: true,
+        onCreate: (name) => quickCreateItem(l.key, name),
+        className: cellCls,
+        inputRef: setCellRef(l.key, "name"),
+        onEnterEmpty: (e) => onKey(e, l.key, "name", lines, addLine),
+        onArrow: onArrow(l.key, "name", lines),
+        placeholder: "Item name\u2026",
+        render: (o) => /* @__PURE__ */ React.createElement("div", { className: "flex justify-between" }, /* @__PURE__ */ React.createElement("span", { className: "font-medium" }, o.label), /* @__PURE__ */ React.createElement("span", { className: "text-[11px] text-zinc-500 num" }, "cost ", fmt(o.item.purchaseRate, cur), " \xB7 stk ", fq(o.item.stock)))
+      }
+    ), /* @__PURE__ */ React.createElement("input", { ref: setCellRef(l.key, "qty"), value: l.qty, onChange: (e) => update(l.key, { qty: e.target.value }), onKeyDown: (e) => onKey(e, l.key, "qty", lines, addLine), className: cellCls + " text-center num font-semibold", placeholder: "0", inputMode: "decimal" }), /* @__PURE__ */ React.createElement("input", { ref: setCellRef(l.key, "rate"), value: l.rate, onChange: (e) => update(l.key, { rate: e.target.value }), onKeyDown: (e) => onKey(e, l.key, "rate", lines, addLine), className: cellCls + " text-right num", placeholder: "0.00", inputMode: "decimal" }), /* @__PURE__ */ React.createElement("div", { className: "text-right text-[13px] font-bold num pr-1" }, n2(l.qty) * n2(l.rate) > 0 ? fq(n2(l.qty) * n2(l.rate)) : "\u2014"), /* @__PURE__ */ React.createElement("button", { tabIndex: -1, onClick: () => removeLine(l.key), className: "w-7 h-7 rounded-md text-red-400 hover:bg-red-950/40 text-sm" }, "\u2715"));
+  }), /* @__PURE__ */ React.createElement(Btn, { kind: "soft", size: "sm", className: "mt-2", onClick: () => {
+    const k = addLine();
+    focusCell(k, "name");
+  } }, "+ Add row"))), /* @__PURE__ */ React.createElement("div", { className: "grid md:grid-cols-2 gap-3" }, /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800 p-4" }, /* @__PURE__ */ React.createElement("h3", { className: "text-xs font-bold uppercase tracking-wide text-zinc-500 mb-3" }, "Payment to supplier"), /* @__PURE__ */ React.createElement("div", { className: "grid grid-cols-2 gap-3" }, /* @__PURE__ */ React.createElement(Field, { label: `Paid now (${cur})` }, /* @__PURE__ */ React.createElement(Input, { value: paidNow, onChange: (e) => setPaidNow(e.target.value), inputMode: "decimal", placeholder: "0", disabled: !!editing })), /* @__PURE__ */ React.createElement(Field, { label: "Mode" }, /* @__PURE__ */ React.createElement(Select, { value: payMode, onChange: (e) => setPayMode(e.target.value) }, S.payModes.map((m) => /* @__PURE__ */ React.createElement("option", { key: m }, m)))))), /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800 p-4" }, /* @__PURE__ */ React.createElement("div", { className: "flex justify-between text-sm py-1 text-zinc-400" }, /* @__PURE__ */ React.createElement("span", null, "Sub total"), /* @__PURE__ */ React.createElement("b", { className: "num" }, fmt(subTotal, cur))), /* @__PURE__ */ React.createElement("div", { className: "flex justify-between items-center text-sm py-1 text-zinc-400" }, /* @__PURE__ */ React.createElement("span", null, "Other charges (transport etc.)"), /* @__PURE__ */ React.createElement("input", { value: other, onChange: (e) => setOther(e.target.value), className: "w-24 px-2 py-1 text-right text-sm bg-zinc-800 border border-zinc-700 text-zinc-100 rounded-md focus:border-red-500 focus:ring-2 focus:ring-red-500/30 num", inputMode: "decimal" })), /* @__PURE__ */ React.createElement("div", { className: "flex justify-between text-base py-2 mt-1 border-t border-zinc-800 font-extrabold text-zinc-100" }, /* @__PURE__ */ React.createElement("span", null, "TOTAL"), /* @__PURE__ */ React.createElement("span", { className: "num" }, fmt(total, cur))), /* @__PURE__ */ React.createElement(Btn, { kind: "brand", className: "w-full mt-3", disabled: saving, onClick: save }, saving ? "Saving\u2026" : editing ? "Update Purchase" : "Save Purchase"))), savedInfo && /* @__PURE__ */ React.createElement(SaveConfirmModal, { label: `Purchase ${savedInfo.billNo}`, amount: savedInfo.total, cur, onSaveNew: saveAndNew, onDone: () => { setSavedInfo(null); go("purchases"); } }));
+}
+function PurchaseList({ db, derived, actions, go, S }) {
+  const cur = S.currency;
+  const [q, setQ] = useState("");
+  const [confirm, setConfirm] = useState(null);
+  const [view, setView] = useState(null);
+  const rows = useMemo(() => {
+    let list = [...db.purchases].sort((a, b) => String(b.createdAt || b.date).localeCompare(String(a.createdAt || a.date)));
+    if (q.trim()) {
+      const s = clamp(q);
+      list = list.filter((p) => clamp(p.partyName).includes(s) || clamp(p.billNo).includes(s) || clamp(p.supplierInvoiceNo).includes(s));
+    }
+    return list;
+  }, [db.purchases, q]);
+  return /* @__PURE__ */ React.createElement("div", { className: "anim-in" }, /* @__PURE__ */ React.createElement(PageHead, { title: "Purchase List", sub: `${rows.length} bills \xB7 Total ${fmt(rows.reduce((s, p) => s + n2(p.total), 0), cur)}`, right: /* @__PURE__ */ React.createElement(Btn, { kind: "brand", onClick: () => go("new-purchase") }, "+ New Purchase") }), /* @__PURE__ */ React.createElement(Input, { value: q, onChange: (e) => setQ(e.target.value), placeholder: "\u{1F50D} Search supplier / bill no / supplier invoice no\u2026", className: "!w-64 mb-3" }), rows.length === 0 ? /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800" }, /* @__PURE__ */ React.createElement(Empty, { icon: "\u{1F4E6}", msg: "No purchases yet.", action: /* @__PURE__ */ React.createElement(Btn, { kind: "brand", size: "sm", onClick: () => go("new-purchase") }, "Add Purchase") })) : /* @__PURE__ */ React.createElement(Table, { head: ["Bill", "Date", "Supplier", { t: "Total", right: true }, { t: "Paid", right: true }, { t: "Balance", right: true }, ""] }, rows.map((p) => {
+    const paid = derived.paidByRef[p.id] || 0;
+    const bal = n2(p.total) - paid;
+    return /* @__PURE__ */ React.createElement("tr", { key: p.id, className: "hover:bg-zinc-800/60 cursor-pointer", onClick: () => setView(p) }, /* @__PURE__ */ React.createElement(Td, { className: "font-semibold" }, p.billNo), /* @__PURE__ */ React.createElement(Td, { className: "text-zinc-400 whitespace-nowrap" }, fdate(p.date)), /* @__PURE__ */ React.createElement(Td, null, p.partyName), /* @__PURE__ */ React.createElement(Td, { right: true, className: "font-bold" }, fmt(p.total, cur)), /* @__PURE__ */ React.createElement(Td, { right: true, className: "text-emerald-400" }, fmt(paid, cur)), /* @__PURE__ */ React.createElement(Td, { right: true, className: bal > 0.01 ? "text-red-400 font-semibold" : "text-zinc-600" }, bal > 0.01 ? fmt(bal, cur) : "\u2014"), /* @__PURE__ */ React.createElement(Td, { onClick: (e) => e.stopPropagation() }, /* @__PURE__ */ React.createElement("div", { className: "flex gap-1 justify-end" }, /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "xs", onClick: () => go("new-purchase", { editId: p.id }) }, "\u270E"), /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "xs", className: "!text-red-400", onClick: () => setConfirm(p) }, "\u{1F5D1}"))));
+  })), view && /* @__PURE__ */ React.createElement(Modal, { title: `Purchase ${view.billNo}`, onClose: () => setView(null), wide: true }, /* @__PURE__ */ React.createElement("div", { className: "mb-3" }, /* @__PURE__ */ React.createElement("b", null, view.partyName), " ", /* @__PURE__ */ React.createElement("span", { className: "text-xs text-zinc-500" }, "\xB7 ", fdate(view.date)), view.supplierInvoiceNo && /* @__PURE__ */ React.createElement("span", { className: "text-xs text-zinc-500" }, " \xB7 their inv# ", view.supplierInvoiceNo)), /* @__PURE__ */ React.createElement(Table, { head: ["#", "Item", { t: "Qty", right: true }, { t: "Rate", right: true }, { t: "Amount", right: true }] }, (derived.linesByPurchase[view.id] || []).map((l, i) => /* @__PURE__ */ React.createElement("tr", { key: l.id }, /* @__PURE__ */ React.createElement(Td, null, i + 1), /* @__PURE__ */ React.createElement(Td, { className: "font-medium" }, l.name), /* @__PURE__ */ React.createElement(Td, { right: true }, fq(l.qty)), /* @__PURE__ */ React.createElement(Td, { right: true }, fmt(l.rate, cur)), /* @__PURE__ */ React.createElement(Td, { right: true, className: "font-bold" }, fmt(l.amount, cur))))), /* @__PURE__ */ React.createElement("div", { className: "flex items-center justify-between mt-3" }, /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "sm", onClick: () => { const v = view; setView(null); go("new-purchase-return", { purchaseId: v.id }); } }, "↩️ Purchase Return"), /* @__PURE__ */ React.createElement("div", { className: "text-right font-extrabold" }, "Total: ", /* @__PURE__ */ React.createElement("span", { className: "num" }, fmt(view.total, cur))))), confirm && /* @__PURE__ */ React.createElement(Confirm, { msg: `Delete purchase ${confirm.billNo}? Stock will be reversed.`, onYes: () => actions.deletePurchase(confirm.id), onClose: () => setConfirm(null) }));
+}
+/**
+ * Purchase Return against an existing purchase bill (Module 6). Mirrors NewSalesReturn
+ * exactly but reversed: stock goes OUT (goods sent back to the supplier) and the
+ * refund reduces what we owe the supplier via a Payments-sheet debit, same trick as
+ * Sales Return (a synthetic Payments row keyed by the return's own id).
+ */
+function NewPurchaseReturn({ db, derived, actions, go, S, purchaseId }) {
+  const cur = S.currency;
+  const purchase = db.purchases.find((p) => p.id === purchaseId);
+  const purchaseLines = derived.linesByPurchase[purchaseId] || [];
+  const [qtys, setQtys] = useState({});
+  const [notes, setNotes] = useState("");
+  const [saving, setSaving] = useState(false);
+  if (!purchase) {
+    return /* @__PURE__ */ React.createElement("div", { className: "anim-in" }, /* @__PURE__ */ React.createElement(PageHead, { title: "Purchase not found", right: /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "sm", onClick: () => go("purchases") }, "← Purchase List") }));
+  }
+  const rows = purchaseLines.map((l) => {
+    const returned = derived.returnedQtyByPurchaseItem[l.id] || 0;
+    const remaining = Math.max(0, n2(l.qty) - returned);
+    const retQty = n2(qtys[l.id] || 0);
+    return { ...l, returned, remaining, retQty, amount: retQty * n2(l.rate) };
+  });
+  const total = rows.reduce((s, r) => s + r.amount, 0);
+  const setQty = (lineId, v, max) => {
+    const capped = v === "" ? "" : String(Math.min(Math.max(n2(v), 0), max));
+    setQtys((q) => ({ ...q, [lineId]: capped }));
+  };
+  const save = async () => {
+    const items = rows.filter((r) => r.retQty > 0).map((r) => ({ purchaseItemId: r.id, itemId: r.itemId, name: r.name, qty: r.retQty, rate: n2(r.rate), amount: r.amount }));
+    if (!items.length) {
+      toast("Enter a return quantity for at least one line", "warn");
+      return;
+    }
+    setSaving(true);
+    try {
+      await actions.savePurchaseReturn({
+        purchaseReturn: { id: "", date: today(), partyId: purchase.partyId, partyName: purchase.partyName, subTotal: total, taxAmt: 0, total, notes, sourceType: "Purchase", sourceId: purchase.id },
+        items
+      });
+      go("purchase-returns");
+    } catch (e) {
+      toast("Save failed: " + (e.message || e), "err");
+    }
+    setSaving(false);
+  };
+  return /* @__PURE__ */ React.createElement("div", { className: "anim-in" }, /* @__PURE__ */ React.createElement(PageHead, { title: `Purchase Return — ${purchase.billNo}`, sub: `${purchase.partyName} \xB7 ${fdate(purchase.date)}`, right: /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "sm", onClick: () => go("purchases") }, "← Purchase List") }), /* @__PURE__ */ React.createElement(Table, { head: ["Item", { t: "Purchased", right: true }, { t: "Returned", right: true }, { t: "Returnable", right: true }, { t: "Return Qty", right: true }, { t: "Amount", right: true }] }, rows.map((r) => /* @__PURE__ */ React.createElement("tr", { key: r.id }, /* @__PURE__ */ React.createElement(Td, { className: "font-medium" }, r.name), /* @__PURE__ */ React.createElement(Td, { right: true }, fq(r.qty)), /* @__PURE__ */ React.createElement(Td, { right: true, className: "text-zinc-500" }, r.returned > 0 ? fq(r.returned) : "—"), /* @__PURE__ */ React.createElement(Td, { right: true, className: r.remaining <= 0 ? "text-zinc-600" : "text-emerald-400" }, fq(r.remaining)), /* @__PURE__ */ React.createElement(Td, { right: true }, /* @__PURE__ */ React.createElement("input", { value: qtys[r.id] ?? "", onChange: (e) => setQty(r.id, e.target.value, r.remaining), disabled: r.remaining <= 0, inputMode: "decimal", className: "w-20 px-2 py-1 text-right text-sm bg-zinc-800 border border-zinc-700 text-zinc-100 rounded-md focus:border-red-500 focus:ring-2 focus:ring-red-500/30 num disabled:opacity-40", placeholder: "0" })), /* @__PURE__ */ React.createElement(Td, { right: true, className: "font-bold" }, r.amount > 0 ? fmt(r.amount, cur) : "—")))), /* @__PURE__ */ React.createElement("div", { className: "max-w-sm ml-auto bg-zinc-900 rounded-xl border border-zinc-800 p-4 mt-4" }, /* @__PURE__ */ React.createElement(Field, { label: "Notes" }, /* @__PURE__ */ React.createElement(Input, { value: notes, onChange: (e) => setNotes(e.target.value), placeholder: "Reason for return…" })), /* @__PURE__ */ React.createElement("div", { className: "flex justify-between text-base py-2 mt-3 border-t border-zinc-800 font-extrabold text-zinc-100" }, /* @__PURE__ */ React.createElement("span", null, "REFUND TOTAL"), /* @__PURE__ */ React.createElement("span", { className: "num" }, fmt(total, cur))), /* @__PURE__ */ React.createElement(Btn, { kind: "brand", className: "w-full mt-2", disabled: saving || total <= 0, onClick: save }, saving ? "Saving…" : "Save Purchase Return")));
+}
+function PurchaseReturnsList({ db, derived, actions, go, S }) {
+  const cur = S.currency;
+  const [q, setQ] = useState("");
+  const [confirm, setConfirm] = useState(null);
+  const [view, setView] = useState(null);
+  const rows = useMemo(() => {
+    let list = [...db.purchaseReturns].sort((a, b) => String(b.createdAt || b.date).localeCompare(String(a.createdAt || a.date)));
+    if (q.trim()) {
+      const s = clamp(q);
+      list = list.filter((r) => clamp(r.partyName).includes(s) || clamp(r.prNo).includes(s));
+    }
+    return list;
+  }, [db.purchaseReturns, q]);
+  return /* @__PURE__ */ React.createElement("div", { className: "anim-in" }, /* @__PURE__ */ React.createElement(PageHead, { title: "Purchase Returns", sub: `${rows.length} returns \xB7 Started from a purchase bill's "Purchase Return" button` }), /* @__PURE__ */ React.createElement(Input, { value: q, onChange: (e) => setQ(e.target.value), placeholder: "🔍 Search supplier / return no…", className: "!w-64 mb-3" }), rows.length === 0 ? /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800" }, /* @__PURE__ */ React.createElement(Empty, { icon: "↩️", msg: "No purchase returns yet. Open a purchase bill and click “Purchase Return”." })) : /* @__PURE__ */ React.createElement(Table, { head: ["Return", "Date", "Supplier", { t: "Total", right: true }, ""] }, rows.map((r) => /* @__PURE__ */ React.createElement("tr", { key: r.id, className: "hover:bg-zinc-800/60 cursor-pointer", onClick: () => setView(r) }, /* @__PURE__ */ React.createElement(Td, { className: "font-semibold" }, r.prNo), /* @__PURE__ */ React.createElement(Td, { className: "text-zinc-400 whitespace-nowrap" }, fdate(r.date)), /* @__PURE__ */ React.createElement(Td, null, r.partyName), /* @__PURE__ */ React.createElement(Td, { right: true, className: "font-bold" }, fmt(r.total, cur)), /* @__PURE__ */ React.createElement(Td, { onClick: (e) => e.stopPropagation() }, /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "xs", className: "!text-red-400", onClick: () => setConfirm(r) }, "\u{1F5D1}"))))), view && /* @__PURE__ */ React.createElement(Modal, { title: `Purchase Return ${view.prNo}`, onClose: () => setView(null), wide: true }, /* @__PURE__ */ React.createElement("div", { className: "mb-3" }, /* @__PURE__ */ React.createElement("b", null, view.partyName), " ", /* @__PURE__ */ React.createElement("span", { className: "text-xs text-zinc-500" }, "\xB7 ", fdate(view.date))), /* @__PURE__ */ React.createElement(Table, { head: ["#", "Item", { t: "Qty", right: true }, { t: "Rate", right: true }, { t: "Amount", right: true }] }, (derived.linesByPurchaseReturn[view.id] || []).map((l, i) => /* @__PURE__ */ React.createElement("tr", { key: l.id }, /* @__PURE__ */ React.createElement(Td, null, i + 1), /* @__PURE__ */ React.createElement(Td, { className: "font-medium" }, l.name), /* @__PURE__ */ React.createElement(Td, { right: true }, fq(l.qty)), /* @__PURE__ */ React.createElement(Td, { right: true }, fmt(l.rate, cur)), /* @__PURE__ */ React.createElement(Td, { right: true, className: "font-bold" }, fmt(l.amount, cur))))), /* @__PURE__ */ React.createElement("div", { className: "text-right mt-3 font-extrabold" }, "Refund total: ", /* @__PURE__ */ React.createElement("span", { className: "num" }, fmt(view.total, cur)))), confirm && /* @__PURE__ */ React.createElement(Confirm, { msg: `Delete return ${confirm.prNo}? Stock will be reversed and the supplier's balance will go back up.`, onYes: () => actions.deletePurchaseReturn(confirm.id), onClose: () => setConfirm(null) }));
+}
+/**
+ * Shared entry form for Quotations and Sales Orders (Module 4). The two are
+ * structurally identical — party, dated line-item grid, discount/tax, total — the
+ * only real differences are which sheet they save to and what happens next, so one
+ * component driven by a small `docType` switch beats maintaining two near-duplicate
+ * 300-line forms that would slowly drift apart. Neither touches stock: that only
+ * happens once goods actually leave, at Invoice save, same rule as every other module.
+ * `convertFrom` (optional): `{ sheet: 'Quotations', id, doc, lines }` — when set, this
+ * is a one-click conversion from an earlier document. Its lines/party pre-fill the
+ * form, and on save the source document is marked 'Converted' (never deleted).
+ */
+function SalesDocForm({ db, derived, actions, go, S, docType, editId, convertFrom }) {
+  const cur = S.currency;
+  const isQuo = docType === "quotation";
+  const list = isQuo ? db.quotations : db.salesOrders;
+  const linesBy = isQuo ? derived.linesByQuotation : derived.linesBySalesOrder;
+  const noField = isQuo ? "quoNo" : "soNo";
+  const docKey = isQuo ? "quotation" : "salesOrder";
+  const label = isQuo ? "Quotation" : "Sales Order";
+  const listPage = isQuo ? "quotations" : "sales-orders";
+  const saveAction = isQuo ? actions.saveQuotation : actions.saveSalesOrder;
+
+  const editing = editId ? list.find((d) => d.id === editId) : null;
+  const editLines = editing ? linesBy[editId] || [] : [];
+  const convertLines = convertFrom ? convertFrom.lines.map((l) => ({ key: uid(), itemId: l.itemId, name: l.name, brand: l.brand, packing: l.packing, packs: l.packs, qty: l.qty, rate: l.rate, cost: n2(l.cost) })) : null;
+
+  const [date, setDate] = useState(editing ? String(editing.date).slice(0, 10) : today());
+  const [partyName, setPartyName] = useState(editing ? editing.partyName : convertFrom ? convertFrom.doc.partyName : "");
+  const [partyId, setPartyId] = useState(editing ? editing.partyId : convertFrom ? convertFrom.doc.partyId : "");
+  const [lines, setLines] = useState(editing ? editLines.map((l) => ({ key: uid(), itemId: l.itemId, name: l.name, brand: l.brand, packing: l.packing, packs: l.packs, qty: l.qty, rate: l.rate, cost: n2(l.cost) })) : convertLines || [emptyLine(), emptyLine(), emptyLine()]);
+  const [discount, setDiscount] = useState(editing ? n2(editing.discount) : convertFrom ? n2(convertFrom.doc.discount) : 0);
+  const [taxOn, setTaxOn] = useState(editing ? n2(editing.taxPct) > 0 : convertFrom ? n2(convertFrom.doc.taxPct) > 0 : !!S.taxEnabled);
+  const [notes, setNotes] = useState(editing ? editing.notes || "" : "");
+  const [saving, setSaving] = useState(false);
+  const flow = ["name", "brand", "packing", "packs", "qty", "rate"];
+  const { setCellRef, focusCell, onCellKey, onArrow } = useGridNav(flow);
+  const itemOptions = useMemo(() => db.items.filter((i) => i.active !== false).map((i) => ({ id: i.id, label: i.name, sub: i.brand, item: i })), [db.items]);
+  const partyOptions = useMemo(() => db.parties.filter((p) => p.type !== "Supplier").map((p) => ({ id: p.id, label: p.name, sub: p.phone })), [db.parties]);
+  const update = (key, patch) => setLines((ls) => ls.map((l) => l.key === key ? { ...l, ...patch } : l));
+  const removeLine = (key) => setLines((ls) => ls.length > 1 ? ls.filter((l) => l.key !== key) : ls);
+  const addLine = () => {
+    const nl = emptyLine();
+    setLines((ls) => [...ls, nl]);
+    return nl.key;
+  };
+  const lineAmt = (l) => n2(l.qty) * n2(l.rate);
+  const filled = lines.filter((l) => l.name.trim() && n2(l.qty) > 0);
+  const subTotal = filled.reduce((s, l) => s + lineAmt(l), 0);
+  const taxPct = taxOn ? n2(S.taxPct) : 0;
+  const taxable = Math.max(0, subTotal - n2(discount));
+  const taxAmt = taxable * taxPct / 100;
+  const total = taxable + taxAmt;
+  const pickItem = (key, o) => {
+    const it = o.item;
+    update(key, { itemId: it.id, name: it.name, brand: it.brand || "", packing: it.packSize || "", cost: n2(it.purchaseRate), rate: n2(it.saleRate) || "" });
+    focusCell(key, "packs");
+  };
+  const quickCreateItem = async (key, name) => {
+    const rec = await actions.saveItem({ name, brand: "", category: "", unit: S.units[0] || "Pcs", packSize: "", saleRate: 0, purchaseRate: 0, stock: 0, minStock: 0, active: true });
+    update(key, { itemId: rec.id, name: rec.name });
+    focusCell(key, "brand");
+  };
+  const pickParty = (o) => {
+    setPartyId(o.id);
+    setPartyName(o.label);
+  };
+  const quickCreateParty = async (name) => {
+    const rec = await actions.saveParty({ name, type: "Customer", phone: "", address: "", gstin: "", openingBalance: 0, notes: "" });
+    setPartyId(rec.id);
+    setPartyName(rec.name);
+  };
+  const setPacking = (key, v) => {
+    const l = lines.find((x) => x.key === key);
+    const packs = n2(l.packs);
+    update(key, { packing: v, qty: n2(v) > 0 && packs > 0 ? n2(v) * packs : l.qty });
+  };
+  const setPacks = (key, v) => {
+    const l = lines.find((x) => x.key === key);
+    const pk = n2(l.packing);
+    update(key, { packs: v, qty: pk > 0 && n2(v) > 0 ? pk * n2(v) : l.qty });
+  };
+  const save = async () => {
+    if (!filled.length) {
+      toast("Add at least one item with quantity", "warn");
+      return;
+    }
+    setSaving(true);
+    try {
+      const doc = {
+        id: editing ? editing.id : "",
+        [noField]: editing ? editing[noField] : "",
+        date, partyId, partyName: partyName.trim() || "Cash Sale",
+        subTotal, discount: n2(discount), taxPct, taxAmt, total,
+        status: editing ? editing.status : "Open",
+        notes, createdAt: editing ? editing.createdAt : ""
+      };
+      if (convertFrom) {
+        doc.sourceType = convertFrom.sheet === "Quotations" ? "Quotation" : "SalesOrder";
+        doc.sourceId = convertFrom.id;
+      }
+      const payload = { [docKey]: doc, items: filled.map((l) => ({ itemId: l.itemId, name: l.name.trim(), brand: l.brand, packing: l.packing, packs: n2(l.packs), qty: n2(l.qty), rate: n2(l.rate), amount: lineAmt(l), cost: n2(l.cost) })) };
+      await saveAction(payload);
+      if (convertFrom) await actions.markConverted(convertFrom.sheet, convertFrom.id);
+      go(listPage);
+    } catch (e) {
+      toast("Save failed: " + (e.message || e), "err");
+    }
+    setSaving(false);
+  };
+  const gridCols = "grid grid-cols-[34px_minmax(180px,2fr)_minmax(90px,1fr)_72px_64px_72px_90px_100px_34px] gap-1.5 items-center";
+  const cellCls = "w-full px-2 py-1.5 text-[13px] bg-zinc-800 border border-zinc-700 text-zinc-100 rounded-md focus:border-red-500 focus:ring-2 focus:ring-red-500/30 num";
+  return /* @__PURE__ */ React.createElement("div", { className: "anim-in" }, /* @__PURE__ */ React.createElement(PageHead, { title: editing ? `Edit ${editing[noField]}` : convertFrom ? `New ${label} (from ${convertFrom.doc[convertFrom.sheet === "Quotations" ? "quoNo" : "soNo"]})` : `New ${label}`, sub: "Enter moves to next field", right: /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "sm", onClick: () => go(listPage) }, `← ${label} List`) }), /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800 p-4 mb-3 grid md:grid-cols-3 gap-3" }, /* @__PURE__ */ React.createElement(Field, { label: "Customer" }, /* @__PURE__ */ React.createElement(AutoComplete, { value: partyName, onChange: (v) => { setPartyName(v); setPartyId(""); }, options: partyOptions, onPick: pickParty, allowCreate: true, onCreate: quickCreateParty, placeholder: "Search or add customer…" })), /* @__PURE__ */ React.createElement(Field, { label: "Date" }, /* @__PURE__ */ React.createElement(Input, { type: "date", value: date, onChange: (e) => setDate(e.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Notes" }, /* @__PURE__ */ React.createElement(Input, { value: notes, onChange: (e) => setNotes(e.target.value), placeholder: "Optional…" }))), /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800 p-4 mb-3 overflow-x-auto" }, /* @__PURE__ */ React.createElement("div", { className: "min-w-[760px]" }, /* @__PURE__ */ React.createElement("div", { className: `${gridCols} pb-2 border-b border-zinc-800 mb-2 text-[10px] font-bold uppercase tracking-wide text-zinc-500` }, /* @__PURE__ */ React.createElement("div", null, "Sr"), /* @__PURE__ */ React.createElement("div", null, "Item Description"), /* @__PURE__ */ React.createElement("div", null, "Brand"), /* @__PURE__ */ React.createElement("div", { className: "text-center" }, "Packing"), /* @__PURE__ */ React.createElement("div", { className: "text-center" }, "Packs"), /* @__PURE__ */ React.createElement("div", { className: "text-center" }, "Qty"), /* @__PURE__ */ React.createElement("div", { className: "text-right" }, "Rate"), /* @__PURE__ */ React.createElement("div", { className: "text-right" }, "Amount"), /* @__PURE__ */ React.createElement("div", null)), lines.map((l, idx) => /* @__PURE__ */ React.createElement("div", { key: l.key, className: gridCols }, /* @__PURE__ */ React.createElement("div", { className: "text-xs text-zinc-500 num text-center" }, idx + 1), /* @__PURE__ */ React.createElement(
+    AutoComplete,
+    {
+      value: l.name,
+      onChange: (v) => update(l.key, { name: v, itemId: "" }),
+      options: itemOptions,
+      onPick: (o) => pickItem(l.key, o),
+      allowCreate: true,
+      onCreate: (name) => quickCreateItem(l.key, name),
+      className: cellCls + " !text-left",
+      inputRef: setCellRef(l.key, "name"),
+      onEnterEmpty: (e) => onCellKey(e, l.key, "name", lines, addLine),
+      onArrow: onArrow(l.key, "name", lines),
+      placeholder: "Type item name…"
+    }
+  ), /* @__PURE__ */ React.createElement("input", { ref: setCellRef(l.key, "brand"), value: l.brand, onChange: (e) => update(l.key, { brand: e.target.value }), onKeyDown: (e) => onCellKey(e, l.key, "brand", lines, addLine), className: cellCls + " !text-left", placeholder: "Brand" }), /* @__PURE__ */ React.createElement("input", { ref: setCellRef(l.key, "packing"), value: l.packing, onChange: (e) => setPacking(l.key, e.target.value), onKeyDown: (e) => onCellKey(e, l.key, "packing", lines, addLine), className: cellCls + " text-center", placeholder: "Pack", inputMode: "decimal" }), /* @__PURE__ */ React.createElement("input", { ref: setCellRef(l.key, "packs"), value: l.packs, onChange: (e) => setPacks(l.key, e.target.value), onKeyDown: (e) => onCellKey(e, l.key, "packs", lines, addLine), className: cellCls + " text-center", placeholder: "0", inputMode: "decimal" }), /* @__PURE__ */ React.createElement("input", { ref: setCellRef(l.key, "qty"), value: l.qty, onChange: (e) => update(l.key, { qty: e.target.value }), onKeyDown: (e) => onCellKey(e, l.key, "qty", lines, addLine), className: cellCls + " text-center font-semibold", placeholder: "0", inputMode: "decimal" }), /* @__PURE__ */ React.createElement("input", { ref: setCellRef(l.key, "rate"), value: l.rate, onChange: (e) => update(l.key, { rate: e.target.value }), onKeyDown: (e) => onCellKey(e, l.key, "rate", lines, addLine), className: cellCls + " text-right", placeholder: "0.00", inputMode: "decimal" }), /* @__PURE__ */ React.createElement("div", { className: "text-right text-[13px] font-bold num pr-1" }, lineAmt(l) > 0 ? fq(lineAmt(l)) : "—"), /* @__PURE__ */ React.createElement("button", { tabIndex: -1, onClick: () => removeLine(l.key), className: "w-7 h-7 rounded-md text-red-400 hover:bg-red-950/40 text-sm" }, "✕"))), /* @__PURE__ */ React.createElement(Btn, { kind: "soft", size: "sm", className: "mt-2", onClick: () => {
+    const k = addLine();
+    focusCell(k, "name");
+  } }, "+ Add row"))), /* @__PURE__ */ React.createElement("div", { className: "max-w-sm ml-auto bg-zinc-900 rounded-xl border border-zinc-800 p-4" }, /* @__PURE__ */ React.createElement("div", { className: "flex justify-between text-sm py-1 text-zinc-400" }, /* @__PURE__ */ React.createElement("span", null, "Sub total"), /* @__PURE__ */ React.createElement("b", { className: "num" }, fmt(subTotal, cur))), /* @__PURE__ */ React.createElement("div", { className: "flex justify-between items-center text-sm py-1 text-zinc-400" }, /* @__PURE__ */ React.createElement("span", null, "Discount"), /* @__PURE__ */ React.createElement("input", { value: discount, onChange: (e) => setDiscount(e.target.value), className: "w-24 px-2 py-1 text-right text-sm bg-zinc-800 border border-zinc-700 text-zinc-100 rounded-md focus:border-red-500 focus:ring-2 focus:ring-red-500/30 num", inputMode: "decimal" })), /* @__PURE__ */ React.createElement("div", { className: "flex justify-between items-center text-sm py-1 text-zinc-400" }, /* @__PURE__ */ React.createElement("label", { className: "flex items-center gap-1.5 cursor-pointer" }, /* @__PURE__ */ React.createElement("input", { type: "checkbox", checked: taxOn, onChange: (e) => setTaxOn(e.target.checked) }), " ", S.taxLabel, " ", S.taxPct, "%"), /* @__PURE__ */ React.createElement("b", { className: "num" }, fmt(taxAmt, cur))), /* @__PURE__ */ React.createElement("div", { className: "flex justify-between text-base py-2 mt-1 border-t border-zinc-800 font-extrabold text-zinc-100" }, /* @__PURE__ */ React.createElement("span", null, "TOTAL"), /* @__PURE__ */ React.createElement("span", { className: "num" }, fmt(total, cur))), /* @__PURE__ */ React.createElement(Btn, { kind: "brand", className: "w-full mt-3", disabled: saving, onClick: save }, saving ? "Saving…" : editing ? `Update ${label}` : `Save ${label}`)));
+}
+function QuotationsList({ db, derived, actions, go, S }) {
+  const cur = S.currency;
+  const [q, setQ] = useState("");
+  const [confirm, setConfirm] = useState(null);
+  const [view, setView] = useState(null);
+  const rows = useMemo(() => {
+    let list = [...db.quotations].sort((a, b) => String(b.createdAt || b.date).localeCompare(String(a.createdAt || a.date)));
+    if (q.trim()) {
+      const s = clamp(q);
+      list = list.filter((d) => clamp(d.partyName).includes(s) || clamp(d.quoNo).includes(s));
+    }
+    return list;
+  }, [db.quotations, q]);
+  return /* @__PURE__ */ React.createElement("div", { className: "anim-in" }, /* @__PURE__ */ React.createElement(PageHead, { title: "Quotations", sub: `${rows.length} quotations`, right: /* @__PURE__ */ React.createElement(Btn, { kind: "brand", onClick: () => go("new-quotation") }, "+ New Quotation") }), /* @__PURE__ */ React.createElement(Input, { value: q, onChange: (e) => setQ(e.target.value), placeholder: "🔍 Search party / quotation no…", className: "!w-64 mb-3" }), rows.length === 0 ? /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800" }, /* @__PURE__ */ React.createElement(Empty, { icon: "\u{1F4C4}", msg: "No quotations yet.", action: /* @__PURE__ */ React.createElement(Btn, { kind: "brand", size: "sm", onClick: () => go("new-quotation") }, "New Quotation") })) : /* @__PURE__ */ React.createElement(Table, { head: ["Quotation", "Date", "Party", { t: "Total", right: true }, "Status", ""] }, rows.map((quo) => /* @__PURE__ */ React.createElement("tr", { key: quo.id, className: "hover:bg-zinc-800/60 cursor-pointer", onClick: () => setView(quo) }, /* @__PURE__ */ React.createElement(Td, { className: "font-semibold" }, quo.quoNo), /* @__PURE__ */ React.createElement(Td, { className: "text-zinc-400 whitespace-nowrap" }, fdate(quo.date)), /* @__PURE__ */ React.createElement(Td, null, quo.partyName), /* @__PURE__ */ React.createElement(Td, { right: true, className: "font-bold" }, fmt(quo.total, cur)), /* @__PURE__ */ React.createElement(Td, null, /* @__PURE__ */ React.createElement("span", { className: `px-2 py-0.5 rounded-full text-[10px] font-bold ${quo.status === "Converted" ? "bg-emerald-950/50 text-emerald-400" : "bg-blue-950/50 text-blue-400"}` }, quo.status)), /* @__PURE__ */ React.createElement(Td, { onClick: (e) => e.stopPropagation() }, /* @__PURE__ */ React.createElement("div", { className: "flex gap-1 justify-end" }, quo.status !== "Converted" && /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "xs", onClick: () => go("new-sales-order", { convertFrom: { sheet: "Quotations", id: quo.id, doc: quo, lines: derived.linesByQuotation[quo.id] || [] } }) }, "→ SO"), /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "xs", onClick: () => go("new-sale", { convertFrom: { sheet: "Quotations", id: quo.id, doc: quo, lines: derived.linesByQuotation[quo.id] || [] } }) }, "→ Invoice"), /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "xs", onClick: () => go("new-quotation", { editId: quo.id }) }, "✎")), /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "xs", className: "!text-red-400", onClick: () => setConfirm(quo) }, "\u{1F5D1}")))))), view && /* @__PURE__ */ React.createElement(Modal, { title: `Quotation ${view.quoNo}`, onClose: () => setView(null), wide: true }, /* @__PURE__ */ React.createElement("div", { className: "mb-3" }, /* @__PURE__ */ React.createElement("b", null, view.partyName), " ", /* @__PURE__ */ React.createElement("span", { className: "text-xs text-zinc-500" }, "\xB7 ", fdate(view.date))), /* @__PURE__ */ React.createElement(Table, { head: ["#", "Item", { t: "Qty", right: true }, { t: "Rate", right: true }, { t: "Amount", right: true }] }, (derived.linesByQuotation[view.id] || []).map((l, i) => /* @__PURE__ */ React.createElement("tr", { key: l.id }, /* @__PURE__ */ React.createElement(Td, null, i + 1), /* @__PURE__ */ React.createElement(Td, { className: "font-medium" }, l.name), /* @__PURE__ */ React.createElement(Td, { right: true }, fq(l.qty)), /* @__PURE__ */ React.createElement(Td, { right: true }, fmt(l.rate, cur)), /* @__PURE__ */ React.createElement(Td, { right: true, className: "font-bold" }, fmt(l.amount, cur))))), /* @__PURE__ */ React.createElement("div", { className: "text-right mt-3 font-extrabold" }, "Total: ", /* @__PURE__ */ React.createElement("span", { className: "num" }, fmt(view.total, cur)))), confirm && /* @__PURE__ */ React.createElement(Confirm, { msg: `Delete quotation ${confirm.quoNo}?`, onYes: () => actions.deleteQuotation(confirm.id), onClose: () => setConfirm(null) }));
+}
+function SalesOrdersList({ db, derived, actions, go, S }) {
+  const cur = S.currency;
+  const [q, setQ] = useState("");
+  const [confirm, setConfirm] = useState(null);
+  const [view, setView] = useState(null);
+  const rows = useMemo(() => {
+    let list = [...db.salesOrders].sort((a, b) => String(b.createdAt || b.date).localeCompare(String(a.createdAt || a.date)));
+    if (q.trim()) {
+      const s = clamp(q);
+      list = list.filter((d) => clamp(d.partyName).includes(s) || clamp(d.soNo).includes(s));
+    }
+    return list;
+  }, [db.salesOrders, q]);
+  return /* @__PURE__ */ React.createElement("div", { className: "anim-in" }, /* @__PURE__ */ React.createElement(PageHead, { title: "Sales Orders", sub: `${rows.length} orders`, right: /* @__PURE__ */ React.createElement(Btn, { kind: "brand", onClick: () => go("new-sales-order") }, "+ New Sales Order") }), /* @__PURE__ */ React.createElement(Input, { value: q, onChange: (e) => setQ(e.target.value), placeholder: "🔍 Search party / SO no…", className: "!w-64 mb-3" }), rows.length === 0 ? /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800" }, /* @__PURE__ */ React.createElement(Empty, { icon: "\u{1F4DD}", msg: "No sales orders yet.", action: /* @__PURE__ */ React.createElement(Btn, { kind: "brand", size: "sm", onClick: () => go("new-sales-order") }, "New Sales Order") })) : /* @__PURE__ */ React.createElement(Table, { head: ["Sales Order", "Date", "Party", { t: "Total", right: true }, "Status", ""] }, rows.map((so) => /* @__PURE__ */ React.createElement("tr", { key: so.id, className: "hover:bg-zinc-800/60 cursor-pointer", onClick: () => setView(so) }, /* @__PURE__ */ React.createElement(Td, { className: "font-semibold" }, so.soNo), /* @__PURE__ */ React.createElement(Td, { className: "text-zinc-400 whitespace-nowrap" }, fdate(so.date)), /* @__PURE__ */ React.createElement(Td, null, so.partyName), /* @__PURE__ */ React.createElement(Td, { right: true, className: "font-bold" }, fmt(so.total, cur)), /* @__PURE__ */ React.createElement(Td, null, /* @__PURE__ */ React.createElement("span", { className: `px-2 py-0.5 rounded-full text-[10px] font-bold ${so.status === "Converted" ? "bg-emerald-950/50 text-emerald-400" : "bg-blue-950/50 text-blue-400"}` }, so.status)), /* @__PURE__ */ React.createElement(Td, { onClick: (e) => e.stopPropagation() }, /* @__PURE__ */ React.createElement("div", { className: "flex gap-1 justify-end" }, so.status !== "Converted" && /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "xs", onClick: () => go("new-sale", { convertFrom: { sheet: "SalesOrders", id: so.id, doc: so, lines: derived.linesBySalesOrder[so.id] || [] } }) }, "→ Invoice"), /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "xs", onClick: () => go("new-sales-order", { editId: so.id }) }, "✎")), /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "xs", className: "!text-red-400", onClick: () => setConfirm(so) }, "\u{1F5D1}")))))), view && /* @__PURE__ */ React.createElement(Modal, { title: `Sales Order ${view.soNo}`, onClose: () => setView(null), wide: true }, /* @__PURE__ */ React.createElement("div", { className: "mb-3" }, /* @__PURE__ */ React.createElement("b", null, view.partyName), " ", /* @__PURE__ */ React.createElement("span", { className: "text-xs text-zinc-500" }, "\xB7 ", fdate(view.date))), /* @__PURE__ */ React.createElement(Table, { head: ["#", "Item", { t: "Qty", right: true }, { t: "Rate", right: true }, { t: "Amount", right: true }] }, (derived.linesBySalesOrder[view.id] || []).map((l, i) => /* @__PURE__ */ React.createElement("tr", { key: l.id }, /* @__PURE__ */ React.createElement(Td, null, i + 1), /* @__PURE__ */ React.createElement(Td, { className: "font-medium" }, l.name), /* @__PURE__ */ React.createElement(Td, { right: true }, fq(l.qty)), /* @__PURE__ */ React.createElement(Td, { right: true }, fmt(l.rate, cur)), /* @__PURE__ */ React.createElement(Td, { right: true, className: "font-bold" }, fmt(l.amount, cur))))), /* @__PURE__ */ React.createElement("div", { className: "text-right mt-3 font-extrabold" }, "Total: ", /* @__PURE__ */ React.createElement("span", { className: "num" }, fmt(view.total, cur)))), confirm && /* @__PURE__ */ React.createElement(Confirm, { msg: `Delete sales order ${confirm.soNo}?`, onYes: () => actions.deleteSalesOrder(confirm.id), onClose: () => setConfirm(null) }));
+}
+function ItemsPage({ db, derived, actions, S }) {
+  const cur = S.currency;
+  const [q, setQ] = useState("");
+  const [edit, setEdit] = useState(null);
+  const [confirm, setConfirm] = useState(null);
+  const [onlyLow, setOnlyLow] = useState(false);
+  const [ledgerItem, setLedgerItem] = useState(null);
+  const [catFilter, setCatFilter] = useState("all");
+  const [brandFilter, setBrandFilter] = useState("all");
+  const categories = useMemo(() => [...new Set(db.items.map((i) => i.category).filter(Boolean))].sort(), [db.items]);
+  const brands = useMemo(() => [...new Set(db.items.map((i) => i.brand).filter(Boolean))].sort(), [db.items]);
+  const rows = useMemo(() => {
+    let list = [...db.items].sort((a, b) => String(a.name).localeCompare(String(b.name)));
+    if (q.trim()) {
+      const s = clamp(q);
+      list = list.filter((i) => clamp(i.name).includes(s) || clamp(i.brand).includes(s) || clamp(i.category).includes(s));
+    }
+    if (catFilter !== "all") list = list.filter((i) => i.category === catFilter);
+    if (brandFilter !== "all") list = list.filter((i) => i.brand === brandFilter);
+    if (onlyLow) list = list.filter((i) => n2(i.minStock) > 0 && n2(i.stock) <= n2(i.minStock));
+    return list;
+  }, [db.items, q, catFilter, brandFilter, onlyLow]);
+  const stockValue = db.items.reduce((s, i) => s + n2(i.stock) * n2(i.purchaseRate), 0);
+  return /* @__PURE__ */ React.createElement("div", { className: "anim-in" }, /* @__PURE__ */ React.createElement(PageHead, { title: "Items & Stock", sub: `${db.items.length} items \xB7 Stock value (at cost) ${fmt(stockValue, cur)}`, right: /* @__PURE__ */ React.createElement(Btn, { kind: "brand", onClick: () => setEdit({}) }, "+ Add Item") }), /* @__PURE__ */ React.createElement("div", { className: "flex gap-2 mb-3 items-center flex-wrap" }, /* @__PURE__ */ React.createElement(Input, { value: q, onChange: (e) => setQ(e.target.value), placeholder: "\u{1F50D} Search name / brand / category\u2026", className: "!w-64" }), categories.length > 0 && /* @__PURE__ */ React.createElement(Select, { value: catFilter, onChange: (e) => setCatFilter(e.target.value), className: "!w-auto" }, /* @__PURE__ */ React.createElement("option", { value: "all" }, "All categories"), categories.map((c) => /* @__PURE__ */ React.createElement("option", { key: c, value: c }, c))), brands.length > 0 && /* @__PURE__ */ React.createElement(Select, { value: brandFilter, onChange: (e) => setBrandFilter(e.target.value), className: "!w-auto" }, /* @__PURE__ */ React.createElement("option", { value: "all" }, "All brands"), brands.map((b) => /* @__PURE__ */ React.createElement("option", { key: b, value: b }, b))), /* @__PURE__ */ React.createElement("label", { className: "flex items-center gap-1.5 text-xs font-semibold text-zinc-400 cursor-pointer" }, /* @__PURE__ */ React.createElement("input", { type: "checkbox", checked: onlyLow, onChange: (e) => setOnlyLow(e.target.checked) }), " Low stock only")), rows.length === 0 ? /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800" }, /* @__PURE__ */ React.createElement(Empty, { icon: "\u{1F3F7}\uFE0F", msg: "No items found.", action: /* @__PURE__ */ React.createElement(Btn, { kind: "brand", size: "sm", onClick: () => setEdit({}) }, "Add Item") })) : /* @__PURE__ */ React.createElement(Table, { head: ["Item", "Brand", "Category", { t: "Stock", right: true }, { t: "Cost", right: true }, { t: "Sale Rate", right: true }, { t: "Margin", right: true }, "", ""] }, rows.map((i) => {
+    const margin = n2(i.saleRate) > 0 ? (n2(i.saleRate) - n2(i.purchaseRate)) / n2(i.saleRate) * 100 : null;
+    const low = n2(i.minStock) > 0 && n2(i.stock) <= n2(i.minStock);
+    return /* @__PURE__ */ React.createElement("tr", { key: i.id, className: "hover:bg-zinc-800/60 cursor-pointer", onClick: () => setEdit(i) }, /* @__PURE__ */ React.createElement(Td, { className: "font-semibold" }, i.name, i.active === false && /* @__PURE__ */ React.createElement("span", { className: "ml-2 text-[10px] text-zinc-500" }, "(inactive)")), /* @__PURE__ */ React.createElement(Td, { className: "text-zinc-400" }, i.brand || "\u2014"), /* @__PURE__ */ React.createElement(Td, { className: "text-zinc-400" }, i.category || "\u2014"), /* @__PURE__ */ React.createElement(Td, { right: true, className: low ? "text-red-400 font-bold" : "font-semibold" }, fq(i.stock), " ", /* @__PURE__ */ React.createElement("span", { className: "text-[10px] text-zinc-500" }, i.unit), low && " \u26A0"), /* @__PURE__ */ React.createElement(Td, { right: true, className: "text-zinc-400" }, fmt(i.purchaseRate, cur)), /* @__PURE__ */ React.createElement(Td, { right: true, className: "font-semibold" }, fmt(i.saleRate, cur)), /* @__PURE__ */ React.createElement(Td, { right: true, className: margin === null ? "text-zinc-600" : margin < 0 ? "text-red-400 font-bold" : "text-emerald-400 font-semibold" }, margin === null ? "\u2014" : margin.toFixed(1) + "%"), /* @__PURE__ */ React.createElement(Td, { onClick: (e) => e.stopPropagation() }, /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "xs", onClick: () => setLedgerItem(i) }, "\u{1F4D2}")), /* @__PURE__ */ React.createElement(Td, { onClick: (e) => e.stopPropagation() }, /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "xs", className: "!text-red-400", onClick: () => setConfirm(i) }, "\u{1F5D1}")));
+  })), edit !== null && /* @__PURE__ */ React.createElement(ItemModal, { item: edit, S, onSave: async (it) => {
+    await actions.saveItem(it);
+    setEdit(null);
+  }, onClose: () => setEdit(null) }), confirm && /* @__PURE__ */ React.createElement(Confirm, { msg: `Delete "${confirm.name}"? Old invoices will keep their line data.`, onYes: () => actions.deleteItem(confirm.id), onClose: () => setConfirm(null) }), ledgerItem && /* @__PURE__ */ React.createElement(ItemLedgerModal, { item: ledgerItem, db, derived, cur, onClose: () => setLedgerItem(null) }));
+}
+function ItemModal({ item, S, onSave, onClose }) {
+  const [f, setF] = useState({ name: "", brand: "", category: "", unit: S.units[0] || "Pcs", packSize: "", saleRate: "", purchaseRate: "", stock: "", minStock: "", active: true, ...item });
+  const set = (k, v) => setF((x) => ({ ...x, [k]: v }));
+  const margin = n2(f.saleRate) > 0 ? ((n2(f.saleRate) - n2(f.purchaseRate)) / n2(f.saleRate) * 100).toFixed(1) : null;
+  return /* @__PURE__ */ React.createElement(Modal, { title: item.id ? "Edit Item" : "New Item", onClose }, /* @__PURE__ */ React.createElement("div", { className: "space-y-3" }, /* @__PURE__ */ React.createElement(Field, { label: "Item name *" }, /* @__PURE__ */ React.createElement(Input, { value: f.name, onChange: (e) => set("name", e.target.value), autoFocus: true })), /* @__PURE__ */ React.createElement("div", { className: "grid grid-cols-2 gap-3" }, /* @__PURE__ */ React.createElement(Field, { label: "Brand" }, /* @__PURE__ */ React.createElement(Input, { value: f.brand, onChange: (e) => set("brand", e.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Category" }, /* @__PURE__ */ React.createElement(Input, { value: f.category, onChange: (e) => set("category", e.target.value), placeholder: "Packaging / Catering\u2026" }))), /* @__PURE__ */ React.createElement("div", { className: "grid grid-cols-3 gap-3" }, /* @__PURE__ */ React.createElement(Field, { label: "Unit" }, /* @__PURE__ */ React.createElement(Select, { value: f.unit, onChange: (e) => set("unit", e.target.value) }, S.units.map((u) => /* @__PURE__ */ React.createElement("option", { key: u }, u)))), /* @__PURE__ */ React.createElement(Field, { label: "Pack size", hint: "pcs per pack" }, /* @__PURE__ */ React.createElement(Input, { value: f.packSize, onChange: (e) => set("packSize", e.target.value), inputMode: "decimal" })), /* @__PURE__ */ React.createElement(Field, { label: "Min stock alert" }, /* @__PURE__ */ React.createElement(Input, { value: f.minStock, onChange: (e) => set("minStock", e.target.value), inputMode: "decimal" }))), /* @__PURE__ */ React.createElement("div", { className: "grid grid-cols-3 gap-3" }, /* @__PURE__ */ React.createElement(Field, { label: "Purchase rate (cost)" }, /* @__PURE__ */ React.createElement(Input, { value: f.purchaseRate, onChange: (e) => set("purchaseRate", e.target.value), inputMode: "decimal" })), /* @__PURE__ */ React.createElement(Field, { label: "Sale rate" }, /* @__PURE__ */ React.createElement(Input, { value: f.saleRate, onChange: (e) => set("saleRate", e.target.value), inputMode: "decimal" })), /* @__PURE__ */ React.createElement(Field, { label: "Opening stock" }, /* @__PURE__ */ React.createElement(Input, { value: f.stock, onChange: (e) => set("stock", e.target.value), inputMode: "decimal", disabled: !!item.id }))), margin !== null && /* @__PURE__ */ React.createElement("div", { className: "text-xs text-zinc-400" }, "Margin: ", /* @__PURE__ */ React.createElement("b", { className: n2(margin) < 0 ? "text-red-400" : "text-emerald-400" }, margin, "%")), item.id && /* @__PURE__ */ React.createElement("p", { className: "text-[11px] text-zinc-500" }, "Stock changes automatically with sales & purchases. To correct stock manually, edit it directly in the Google Sheet."), /* @__PURE__ */ React.createElement("label", { className: "flex items-center gap-2 text-sm" }, /* @__PURE__ */ React.createElement("input", { type: "checkbox", checked: f.active !== false, onChange: (e) => set("active", e.target.checked) }), " Active (shows in billing)"), /* @__PURE__ */ React.createElement("div", { className: "flex justify-end gap-2 pt-2" }, /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", onClick: onClose }, "Cancel"), /* @__PURE__ */ React.createElement(Btn, { kind: "brand", onClick: () => {
+    if (!f.name.trim()) {
+      toast("Name required", "warn");
+      return;
+    }
+    onSave({ ...f, saleRate: n2(f.saleRate), purchaseRate: n2(f.purchaseRate), stock: n2(f.stock), minStock: n2(f.minStock) });
+  } }, "Save Item"))));
+}
+function PartiesPage({ db, derived, actions, go, S }) {
+  const cur = S.currency;
+  const [q, setQ] = useState("");
+  const [type, setType] = useState("all");
+  const [edit, setEdit] = useState(null);
+  const [confirm, setConfirm] = useState(null);
+  const rows = useMemo(() => {
+    let list = [...db.parties].sort((a, b) => String(a.name).localeCompare(String(b.name)));
+    if (type !== "all") list = list.filter((p) => p.type === type || p.type === "Both");
+    if (q.trim()) {
+      const s = clamp(q);
+      list = list.filter((p) => clamp(p.name).includes(s) || clamp(p.phone).includes(s));
+    }
+    return list;
+  }, [db.parties, q, type]);
+  return /* @__PURE__ */ React.createElement("div", { className: "anim-in" }, /* @__PURE__ */ React.createElement(PageHead, { title: "Parties", sub: `${db.parties.length} total`, right: /* @__PURE__ */ React.createElement(Btn, { kind: "brand", onClick: () => setEdit({}) }, "+ Add Party") }), /* @__PURE__ */ React.createElement("div", { className: "flex gap-2 mb-3 flex-wrap items-center" }, ["all", "Customer", "Supplier"].map((t) => /* @__PURE__ */ React.createElement("button", { key: t, onClick: () => setType(t), className: `px-3 py-1.5 rounded-full text-xs font-semibold border ${type === t ? "bg-red-600 text-white border-red-600" : "bg-zinc-900 text-zinc-400 border-zinc-700"}` }, t === "all" ? "All" : t + "s")), /* @__PURE__ */ React.createElement(Input, { value: q, onChange: (e) => setQ(e.target.value), placeholder: "\u{1F50D} Search name / phone\u2026", className: "!w-56" })), rows.length === 0 ? /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800" }, /* @__PURE__ */ React.createElement(Empty, { icon: "\u{1F465}", msg: "No parties found.", action: /* @__PURE__ */ React.createElement(Btn, { kind: "brand", size: "sm", onClick: () => setEdit({}) }, "Add Party") })) : /* @__PURE__ */ React.createElement(Table, { head: ["Name", "Type", "Phone", { t: "Balance", right: true }, "", ""] }, rows.map((p) => {
+    const bal = derived.partyBalance[p.id] || 0;
+    return /* @__PURE__ */ React.createElement("tr", { key: p.id, className: "hover:bg-zinc-800/60 cursor-pointer", onClick: () => go("party-detail", { partyId: p.id }) }, /* @__PURE__ */ React.createElement(Td, { className: "font-semibold" }, p.name), /* @__PURE__ */ React.createElement(Td, null, /* @__PURE__ */ React.createElement("span", { className: `px-2 py-0.5 rounded-full text-[10px] font-bold ${p.type === "Supplier" ? "bg-blue-950/50 text-blue-400" : p.type === "Both" ? "bg-purple-950/50 text-purple-400" : "bg-emerald-950/50 text-emerald-400"}` }, p.type || "Customer")), /* @__PURE__ */ React.createElement(Td, { className: "text-zinc-400" }, p.phone || "\u2014"), /* @__PURE__ */ React.createElement(Td, { right: true, className: `font-bold ${bal > 0.01 ? "text-amber-400" : bal < -0.01 ? "text-red-400" : "text-zinc-600"}` }, Math.abs(bal) < 0.01 ? "\u2014" : fmt(Math.abs(bal), cur), bal > 0.01 && /* @__PURE__ */ React.createElement("span", { className: "text-[10px] font-semibold ml-1" }, "DR"), bal < -0.01 && /* @__PURE__ */ React.createElement("span", { className: "text-[10px] font-semibold ml-1" }, "CR")), /* @__PURE__ */ React.createElement(Td, { onClick: (e) => e.stopPropagation() }, /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "xs", onClick: () => go("party-detail", { partyId: p.id, tab: "ledger" }) }, "Ledger")), /* @__PURE__ */ React.createElement(Td, { onClick: (e) => e.stopPropagation() }, /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "xs", className: "!text-red-400", onClick: () => setConfirm(p) }, "\u{1F5D1}")));
+  })), /* @__PURE__ */ React.createElement("p", { className: "text-[11px] text-zinc-500 mt-2" }, "DR = party owes you (receivable) \xB7 CR = you owe party (payable)"), edit !== null && /* @__PURE__ */ React.createElement(PartyModal, { party: edit, onSave: async (p) => {
+    const saved = await actions.saveParty(p);
+    setEdit(null);
+    go("party-detail", { partyId: saved.id });
+  }, onClose: () => setEdit(null) }), confirm && /* @__PURE__ */ React.createElement(Confirm, { msg: `Delete "${confirm.name}"? Their invoices will remain but lose the link.`, onYes: () => actions.deleteParty(confirm.id), onClose: () => setConfirm(null) }));
+}
+function PartyModal({ party, onSave, onClose }) {
+  const [f, setF] = useState({ name: "", type: "Customer", phone: "", address: "", gstin: "", openingBalance: "", notes: "", ...party });
+  const set = (k, v) => setF((x) => ({ ...x, [k]: v }));
+  return /* @__PURE__ */ React.createElement(Modal, { title: party.id ? "Edit Party" : "New Party", onClose }, /* @__PURE__ */ React.createElement("div", { className: "space-y-3" }, /* @__PURE__ */ React.createElement(Field, { label: "Name *" }, /* @__PURE__ */ React.createElement(Input, { value: f.name, onChange: (e) => set("name", e.target.value), autoFocus: true })), /* @__PURE__ */ React.createElement("div", { className: "grid grid-cols-2 gap-3" }, /* @__PURE__ */ React.createElement(Field, { label: "Type" }, /* @__PURE__ */ React.createElement(Select, { value: f.type, onChange: (e) => set("type", e.target.value) }, /* @__PURE__ */ React.createElement("option", null, "Customer"), /* @__PURE__ */ React.createElement("option", null, "Supplier"), /* @__PURE__ */ React.createElement("option", null, "Both"))), /* @__PURE__ */ React.createElement(Field, { label: "Phone" }, /* @__PURE__ */ React.createElement(Input, { value: f.phone, onChange: (e) => set("phone", e.target.value), inputMode: "tel" }))), /* @__PURE__ */ React.createElement(Field, { label: "Address" }, /* @__PURE__ */ React.createElement(Input, { value: f.address, onChange: (e) => set("address", e.target.value) })), /* @__PURE__ */ React.createElement("div", { className: "grid grid-cols-2 gap-3" }, /* @__PURE__ */ React.createElement(Field, { label: "GSTIN" }, /* @__PURE__ */ React.createElement(Input, { value: f.gstin, onChange: (e) => set("gstin", e.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Opening balance", hint: "+ if they owe you, \u2212 if you owe them" }, /* @__PURE__ */ React.createElement(Input, { value: f.openingBalance, onChange: (e) => set("openingBalance", e.target.value), inputMode: "decimal" }))), /* @__PURE__ */ React.createElement("div", { className: "flex justify-end gap-2 pt-2" }, /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", onClick: onClose }, "Cancel"), /* @__PURE__ */ React.createElement(Btn, { kind: "brand", onClick: () => {
+    if (!f.name.trim()) {
+      toast("Name required", "warn");
+      return;
+    }
+    onSave({ ...f, openingBalance: n2(f.openingBalance) });
+  } }, "Save Party"))));
+}
+
+/**
+ * Party detail — the full "manage this customer/supplier" page (Module 2).
+ * PartyModal (above) stays a quick-add popup; once a party exists, every
+ * deeper action (contacts, ledger, visiting card, notes) lives here instead
+ * of overloading one modal with tabs.
+ */
+function PartyDetail({ db, derived, actions, go, S, partyId, tab: initTab }) {
+  const cur = S.currency;
+  const party = db.parties.find((p) => p.id === partyId);
+  const [tab, setTab] = useState(initTab || "profile");
+  const openFollowups = db.followups.filter((f) => f.partyId === partyId && f.status !== "Done");
+  const TABS = [["profile", "Profile"], ["ledger", "Ledger"], ["followups", `Follow-ups${openFollowups.length ? ` (${openFollowups.length})` : ""}`], ["documents", "Documents"], ["notes", "Notes"]];
+  if (!party) {
+    return /* @__PURE__ */ React.createElement("div", { className: "anim-in" }, /* @__PURE__ */ React.createElement(PageHead, { title: "Party not found", right: /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "sm", onClick: () => go("parties") }, "← Parties") }), /* @__PURE__ */ React.createElement(Empty, { icon: "\u{1F465}", msg: "This party no longer exists." }));
+  }
+  const bal = derived.partyBalance[party.id] || 0;
+  // A negative balance means we owe the party — for a Supplier that's a payable (money we
+  // still need to pay them), not an "advance" (which only makes sense the other way round,
+  // when a Customer has pre-paid us). Both share the same sign convention in partyBalance,
+  // just the human-facing word differs by which side of the relationship this party is on.
+  const balSub = Math.abs(bal) > 0.01 ? (bal > 0 ? "Due " : party.type === "Supplier" ? "Payable " : "Advance ") + fmt(Math.abs(bal), cur) : "Settled";
+  return /* @__PURE__ */ React.createElement("div", { className: "anim-in" }, /* @__PURE__ */ React.createElement(PageHead, {
+    title: party.name,
+    sub: `${party.type || "Customer"}${party.phone ? " \xB7 " + party.phone : ""} \xB7 ${balSub}`,
+    right: /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "sm", onClick: () => go("parties") }, "← Parties")
+  }), /* @__PURE__ */ React.createElement("div", { className: "flex gap-1 border-b-2 border-zinc-800 mb-4 overflow-x-auto" }, TABS.map(([id, lbl]) => /* @__PURE__ */ React.createElement("button", { key: id, onClick: () => setTab(id), className: `px-4 py-2 text-sm font-semibold whitespace-nowrap -mb-0.5 border-b-2 transition ${tab === id ? "border-red-500 text-red-400" : "border-transparent text-zinc-500 hover:text-zinc-300"}` }, lbl))), tab === "profile" && /* @__PURE__ */ React.createElement(PartyProfileTab, { party, db, actions }), tab === "ledger" && /* @__PURE__ */ React.createElement(PartyLedgerTab, { party, db, cur }), tab === "followups" && /* @__PURE__ */ React.createElement(PartyFollowupsTab, { party, db, actions }), tab === "documents" && /* @__PURE__ */ React.createElement(PartyDocumentsTab, { party, actions }), tab === "notes" && /* @__PURE__ */ React.createElement(PartyNotesTab, { party, actions }));
+}
+
+function PartyProfileTab({ party, db, actions }) {
+  const [f, setF] = useState({ name: party.name, type: party.type || "Customer", phone: party.phone || "", address: party.address || "", gstin: party.gstin || "", openingBalance: party.openingBalance || 0, category: party.category || "" });
+  const [newContact, setNewContact] = useState({ name: "", role: "", phone: "", whatsapp: "" });
+  const [savingContact, setSavingContact] = useState(false);
+  const set = (k, v) => setF((x) => ({ ...x, [k]: v }));
+  const contacts = db.partyContacts.filter((c) => c.partyId === party.id);
+  const saveProfile = () => {
+    if (!f.name.trim()) { toast("Name required", "warn"); return; }
+    actions.saveParty({ ...party, ...f, openingBalance: n2(f.openingBalance) });
+  };
+  const addContact = async () => {
+    if (!newContact.name.trim()) { toast("Contact name required", "warn"); return; }
+    setSavingContact(true);
+    await actions.saveContact({ partyId: party.id, ...newContact });
+    setNewContact({ name: "", role: "", phone: "", whatsapp: "" });
+    setSavingContact(false);
+  };
+  return /* @__PURE__ */ React.createElement("div", { className: "grid md:grid-cols-2 gap-4" }, /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800 p-4 space-y-3" }, /* @__PURE__ */ React.createElement("h3", { className: "text-xs font-bold uppercase tracking-wide text-zinc-500 mb-1" }, "Profile"), /* @__PURE__ */ React.createElement(Field, { label: "Name *" }, /* @__PURE__ */ React.createElement(Input, { value: f.name, onChange: (e) => set("name", e.target.value) })), /* @__PURE__ */ React.createElement("div", { className: "grid grid-cols-2 gap-3" }, /* @__PURE__ */ React.createElement(Field, { label: "Type" }, /* @__PURE__ */ React.createElement(Select, { value: f.type, onChange: (e) => set("type", e.target.value) }, /* @__PURE__ */ React.createElement("option", null, "Customer"), /* @__PURE__ */ React.createElement("option", null, "Supplier"), /* @__PURE__ */ React.createElement("option", null, "Both"))), /* @__PURE__ */ React.createElement(Field, { label: "Phone" }, /* @__PURE__ */ React.createElement(Input, { value: f.phone, onChange: (e) => set("phone", e.target.value), inputMode: "tel" }))), /* @__PURE__ */ React.createElement(Field, { label: "Address" }, /* @__PURE__ */ React.createElement(Input, { value: f.address, onChange: (e) => set("address", e.target.value) })), /* @__PURE__ */ React.createElement("div", { className: "grid grid-cols-2 gap-3" }, /* @__PURE__ */ React.createElement(Field, { label: "GSTIN" }, /* @__PURE__ */ React.createElement(Input, { value: f.gstin, onChange: (e) => set("gstin", e.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Category", hint: "e.g. Wholesale, VIP…" }, /* @__PURE__ */ React.createElement(Input, { value: f.category, onChange: (e) => set("category", e.target.value) }))), /* @__PURE__ */ React.createElement(Field, { label: "Opening balance", hint: "+ if they owe you, − if you owe them" }, /* @__PURE__ */ React.createElement(Input, { value: f.openingBalance, onChange: (e) => set("openingBalance", e.target.value), inputMode: "decimal" })), /* @__PURE__ */ React.createElement(Btn, { kind: "brand", className: "w-full mt-2", onClick: saveProfile }, "Save Profile")), /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800 p-4" }, /* @__PURE__ */ React.createElement("h3", { className: "text-xs font-bold uppercase tracking-wide text-zinc-500 mb-3" }, "Contacts"), contacts.length === 0 && /* @__PURE__ */ React.createElement("p", { className: "text-sm text-zinc-500 mb-3" }, "No contacts yet — add the people you actually talk to at this business below."), /* @__PURE__ */ React.createElement("div", { className: "space-y-2 mb-4" }, contacts.map((c) => /* @__PURE__ */ React.createElement("div", { key: c.id, className: "flex items-center justify-between gap-2 bg-zinc-800/60 rounded-lg px-3 py-2" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("div", { className: "text-sm font-semibold text-zinc-100" }, c.name, c.role && /* @__PURE__ */ React.createElement("span", { className: "text-zinc-500 font-normal" }, " — ", c.role)), /* @__PURE__ */ React.createElement("div", { className: "text-[11px] text-zinc-500" }, c.phone || "—")), /* @__PURE__ */ React.createElement("div", { className: "flex gap-1" }, (c.whatsapp || c.phone) && /* @__PURE__ */ React.createElement("a", { href: waLink(c.whatsapp || c.phone), target: "_blank", rel: "noreferrer", className: "w-8 h-8 flex items-center justify-center rounded-lg bg-emerald-950/50 text-emerald-400 hover:bg-emerald-950" }, "\u{1F4AC}"), c.phone && /* @__PURE__ */ React.createElement("a", { href: telLink(c.phone), className: "w-8 h-8 flex items-center justify-center rounded-lg bg-blue-950/50 text-blue-400 hover:bg-blue-950" }, "\u{1F4DE}"), /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "xs", className: "!text-red-400", onClick: () => actions.deleteContact(c.id) }, "\u{1F5D1}"))))), /* @__PURE__ */ React.createElement("div", { className: "border-t border-zinc-800 pt-3 space-y-2" }, /* @__PURE__ */ React.createElement("div", { className: "grid grid-cols-2 gap-2" }, /* @__PURE__ */ React.createElement(Input, { value: newContact.name, onChange: (e) => setNewContact((x) => ({ ...x, name: e.target.value })), placeholder: "Name" }), /* @__PURE__ */ React.createElement(Input, { value: newContact.role, onChange: (e) => setNewContact((x) => ({ ...x, role: e.target.value })), placeholder: "Role (Owner, Accountant…)" })), /* @__PURE__ */ React.createElement("div", { className: "grid grid-cols-2 gap-2" }, /* @__PURE__ */ React.createElement(Input, { value: newContact.phone, onChange: (e) => setNewContact((x) => ({ ...x, phone: e.target.value })), placeholder: "Phone", inputMode: "tel" }), /* @__PURE__ */ React.createElement(Input, { value: newContact.whatsapp, onChange: (e) => setNewContact((x) => ({ ...x, whatsapp: e.target.value })), placeholder: "WhatsApp (if different)", inputMode: "tel" })), /* @__PURE__ */ React.createElement(Btn, { kind: "soft", size: "sm", className: "w-full", disabled: savingContact, onClick: addContact }, "+ Add Contact"))));
+}
+
+function PartyLedgerTab({ party, db, cur }) {
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
+  const inRange = (d) => {
+    const dd = String(d).slice(0, 10);
+    return (!from || dd >= from) && (!to || dd <= to);
+  };
+  const entries = useMemo(() => buildLedgerEntries(party, db, inRange), [party, db, from, to]);
+  const closing = entries.length ? entries[entries.length - 1].bal : n2(party.openingBalance);
+  return /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("div", { className: "flex flex-wrap gap-2 items-center mb-3" }, /* @__PURE__ */ React.createElement(Input, { type: "date", value: from, onChange: (e) => setFrom(e.target.value), className: "!w-auto" }), /* @__PURE__ */ React.createElement("span", { className: "text-xs text-zinc-500" }, "to"), /* @__PURE__ */ React.createElement(Input, { type: "date", value: to, onChange: (e) => setTo(e.target.value), className: "!w-auto" }), /* @__PURE__ */ React.createElement("div", { className: "ml-auto font-bold text-sm" }, "Closing: ", /* @__PURE__ */ React.createElement("span", { className: `num ${closing > 0.01 ? "text-amber-400" : closing < -0.01 ? "text-red-400" : "text-zinc-400"}` }, fmt(closing, cur)))), entries.length === 0 ? /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800" }, /* @__PURE__ */ React.createElement(Empty, { icon: "\u{1F4D2}", msg: "No ledger entries in this range." })) : /* @__PURE__ */ React.createElement(Table, { head: ["Date", "Ref", "Description", { t: "Debit", right: true }, { t: "Credit", right: true }, { t: "Balance", right: true }] }, entries.map((e, i) => /* @__PURE__ */ React.createElement("tr", { key: i }, /* @__PURE__ */ React.createElement(Td, { className: "whitespace-nowrap text-zinc-400" }, fdate(e.date)), /* @__PURE__ */ React.createElement(Td, { className: "text-xs" }, e.ref), /* @__PURE__ */ React.createElement(Td, null, e.desc), /* @__PURE__ */ React.createElement(Td, { right: true }, e.dr > 0 ? fmt(e.dr, cur) : "—"), /* @__PURE__ */ React.createElement(Td, { right: true }, e.cr > 0 ? fmt(e.cr, cur) : "—"), /* @__PURE__ */ React.createElement(Td, { right: true, className: `font-bold ${e.bal > 0.01 ? "text-amber-400" : e.bal < -0.01 ? "text-red-400" : "text-zinc-300"}` }, fmt(e.bal, cur))))));
+}
+/**
+ * Follow-up CRM (Module 9): dated reminders against a party — "call back", "payment
+ * follow-up" — replacing the plain free-text notes as the place this kind of thing
+ * lives (Parties.notes stays for genuinely unstructured notes; this is for anything
+ * with a due date that should surface as a worklist item, here and on the Dashboard).
+ */
+function PartyFollowupsTab({ party, db, actions }) {
+  const [dueDate, setDueDate] = useState(today());
+  const [note, setNote] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [confirm, setConfirm] = useState(null);
+  const items = useMemo(() => [...db.followups].filter((f) => f.partyId === party.id).sort((a, b) => String(a.dueDate).localeCompare(String(b.dueDate))), [db.followups, party.id]);
+  const tk = today();
+  const add = async () => {
+    if (!note.trim()) {
+      toast("Enter a note for this follow-up", "warn");
+      return;
+    }
+    setSaving(true);
+    try {
+      await actions.saveFollowup({ id: "", partyId: party.id, partyName: party.name, dueDate, note: note.trim(), status: "Open", completedAt: "" });
+      setNote("");
+    } catch (e) {
+      toast("Save failed: " + (e.message || e), "err");
+    }
+    setSaving(false);
+  };
+  const toggleDone = (f) => actions.saveFollowup({ ...f, status: f.status === "Done" ? "Open" : "Done", completedAt: f.status === "Done" ? "" : new Date().toISOString() });
+  return /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800 p-4 mb-4 max-w-2xl" }, /* @__PURE__ */ React.createElement("h3", { className: "text-xs font-bold uppercase tracking-wide text-zinc-500 mb-3" }, "Add follow-up"), /* @__PURE__ */ React.createElement("div", { className: "flex gap-2 items-end flex-wrap" }, /* @__PURE__ */ React.createElement(Field, { label: "Due date" }, /* @__PURE__ */ React.createElement(Input, { type: "date", value: dueDate, onChange: (e) => setDueDate(e.target.value), className: "!w-auto" })), /* @__PURE__ */ React.createElement("div", { className: "flex-1" }, /* @__PURE__ */ React.createElement(Field, { label: "Note" }, /* @__PURE__ */ React.createElement(Input, { value: note, onChange: (e) => setNote(e.target.value), placeholder: "Call back about payment, confirm order…" }))), /* @__PURE__ */ React.createElement(Btn, { kind: "brand", disabled: saving, onClick: add }, saving ? "Saving…" : "+ Add"))), items.length === 0 ? /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800" }, /* @__PURE__ */ React.createElement(Empty, { icon: "\u{1F4C5}", msg: "No follow-ups for this party yet." })) : /* @__PURE__ */ React.createElement(Table, { head: ["Due", "Note", "Status", ""] }, items.map((f) => {
+    const overdue = f.status !== "Done" && f.dueDate < tk;
+    return /* @__PURE__ */ React.createElement("tr", { key: f.id }, /* @__PURE__ */ React.createElement(Td, { className: `whitespace-nowrap ${overdue ? "text-red-400 font-bold" : "text-zinc-400"}` }, fdate(f.dueDate), overdue && " ⚠"), /* @__PURE__ */ React.createElement(Td, { className: f.status === "Done" ? "text-zinc-500 line-through" : "" }, f.note), /* @__PURE__ */ React.createElement(Td, null, /* @__PURE__ */ React.createElement("span", { className: `px-2 py-0.5 rounded-full text-[10px] font-bold ${f.status === "Done" ? "bg-zinc-800 text-zinc-400" : overdue ? "bg-red-950/50 text-red-400" : "bg-amber-950/50 text-amber-400"}` }, f.status === "Done" ? "DONE" : overdue ? "OVERDUE" : "OPEN")), /* @__PURE__ */ React.createElement(Td, null, /* @__PURE__ */ React.createElement("div", { className: "flex gap-1 justify-end" }, /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "xs", onClick: () => toggleDone(f) }, f.status === "Done" ? "Reopen" : "Mark Done"), /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "xs", className: "!text-red-400", onClick: () => setConfirm(f) }, "\u{1F5D1}"))));
+  })), confirm && /* @__PURE__ */ React.createElement(Confirm, { msg: "Delete this follow-up?", onYes: () => actions.deleteFollowup(confirm.id), onClose: () => setConfirm(null) }));
+}
+
+function PartyDocumentsTab({ party, actions }) {
+  const [uploading, setUploading] = useState(false);
+  const fileRef = useRef(null);
+  const onFile = async (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    setUploading(true);
+    try {
+      await actions.uploadVisitingCard(party, file);
+    } catch (err) {
+      toast("Upload failed: " + (err.message || err), "err");
+    }
+    setUploading(false);
+  };
+  return /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800 p-4 max-w-md" }, /* @__PURE__ */ React.createElement("h3", { className: "text-xs font-bold uppercase tracking-wide text-zinc-500 mb-3" }, "Visiting card"), party.visitingCardUrl ? /* @__PURE__ */ React.createElement("a", { href: party.visitingCardUrl, target: "_blank", rel: "noreferrer" }, /* @__PURE__ */ React.createElement("img", { src: party.visitingCardUrl, className: "w-full rounded-lg border border-zinc-700 mb-3", alt: "Visiting card" })) : /* @__PURE__ */ React.createElement(Empty, { icon: "\u{1F4C7}", msg: "No visiting card uploaded yet." }), /* @__PURE__ */ React.createElement("input", { ref: fileRef, type: "file", accept: "image/*", className: "hidden", onChange: onFile }), /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", className: "w-full", disabled: uploading, onClick: () => fileRef.current.click() }, uploading ? "Uploading…" : party.visitingCardUrl ? "Replace visiting card" : "Upload visiting card"));
+}
+
+function PartyNotesTab({ party, actions }) {
+  const [notes, setNotes] = useState(party.notes || "");
+  return /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800 p-4 max-w-2xl" }, /* @__PURE__ */ React.createElement("h3", { className: "text-xs font-bold uppercase tracking-wide text-zinc-500 mb-3" }, "Notes"), /* @__PURE__ */ React.createElement("p", { className: "text-[11px] text-zinc-500 mb-2" }, "Free-text notebook for this party. For dated reminders (call back, payment follow-up…), use the Follow-ups tab instead."), /* @__PURE__ */ React.createElement("textarea", { value: notes, onChange: (e) => setNotes(e.target.value), rows: 8, className: `${inputCls} resize-y` }), /* @__PURE__ */ React.createElement(Btn, { kind: "brand", className: "mt-3", onClick: () => actions.saveParty({ ...party, notes }) }, "Save Notes"));
+}
+/**
+ * Global Follow-up worklist (Module 9) — every open reminder across every party, sorted
+ * soonest-first, so the owner has one place to work through "who do I need to call
+ * today" instead of clicking into each party individually. The per-party tab above is
+ * for adding/reviewing one party's history; this is the cross-party action list.
+ */
+function FollowupsPage({ db, actions, go }) {
+  const [showDone, setShowDone] = useState(false);
+  const tk = today();
+  const rows = useMemo(() => {
+    let list = [...db.followups];
+    if (!showDone) list = list.filter((f) => f.status !== "Done");
+    return list.sort((a, b) => String(a.dueDate).localeCompare(String(b.dueDate)));
+  }, [db.followups, showDone]);
+  const overdueCount = db.followups.filter((f) => f.status !== "Done" && f.dueDate < tk).length;
+  const toggleDone = (f) => actions.saveFollowup({ ...f, status: f.status === "Done" ? "Open" : "Done", completedAt: f.status === "Done" ? "" : new Date().toISOString() });
+  return /* @__PURE__ */ React.createElement("div", { className: "anim-in" }, /* @__PURE__ */ React.createElement(PageHead, { title: "Follow-ups", sub: `${db.followups.filter((f) => f.status !== "Done").length} open \xB7 ${overdueCount} overdue` }), /* @__PURE__ */ React.createElement("label", { className: "flex items-center gap-1.5 text-xs font-semibold text-zinc-400 cursor-pointer mb-3" }, /* @__PURE__ */ React.createElement("input", { type: "checkbox", checked: showDone, onChange: (e) => setShowDone(e.target.checked) }), " Show completed"), rows.length === 0 ? /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800" }, /* @__PURE__ */ React.createElement(Empty, { icon: "✅", msg: "No open follow-ups. Add one from a party's Follow-ups tab." })) : /* @__PURE__ */ React.createElement(Table, { head: ["Due", "Party", "Note", "Status", ""] }, rows.map((f) => {
+    const overdue = f.status !== "Done" && f.dueDate < tk;
+    return /* @__PURE__ */ React.createElement("tr", { key: f.id }, /* @__PURE__ */ React.createElement(Td, { className: `whitespace-nowrap ${overdue ? "text-red-400 font-bold" : "text-zinc-400"}` }, fdate(f.dueDate), overdue && " ⚠"), /* @__PURE__ */ React.createElement(Td, { className: "font-semibold text-red-400 cursor-pointer", onClick: () => go("party-detail", { partyId: f.partyId, tab: "followups" }) }, f.partyName), /* @__PURE__ */ React.createElement(Td, { className: f.status === "Done" ? "text-zinc-500 line-through" : "" }, f.note), /* @__PURE__ */ React.createElement(Td, null, /* @__PURE__ */ React.createElement("span", { className: `px-2 py-0.5 rounded-full text-[10px] font-bold ${f.status === "Done" ? "bg-zinc-800 text-zinc-400" : overdue ? "bg-red-950/50 text-red-400" : "bg-amber-950/50 text-amber-400"}` }, f.status === "Done" ? "DONE" : overdue ? "OVERDUE" : "OPEN")), /* @__PURE__ */ React.createElement(Td, null, /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "xs", onClick: () => toggleDone(f) }, f.status === "Done" ? "Reopen" : "Mark Done")));
+  })));
+}
+
+/**
+ * Opening Bills (Module 3) — seeds historical bills that predate this system, so day-one
+ * receivable/payable balances are correct without needing to re-enter every old invoice.
+ * A single fast form (no per-row grid — these are one-off entries, not repeating line
+ * items) followed by a party-grouped list of everything seeded so far.
+ */
+function OpeningBillsPage({ db, derived, actions, S }) {
+  const cur = S.currency;
+  const [partyName, setPartyName] = useState("");
+  const [partyId, setPartyId] = useState("");
+  const [type, setType] = useState("Sale");
+  const [billNo, setBillNo] = useState("");
+  const [date, setDate] = useState(today());
+  const [amount, setAmount] = useState("");
+  const [paidAmount, setPaidAmount] = useState("");
+  const [notes, setNotes] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [confirm, setConfirm] = useState(null);
+  const partyRef = useRef(null);
+  const partyOptions = useMemo(() => db.parties.map((p) => ({ id: p.id, label: p.name, sub: p.phone })), [db.parties]);
+  const quickCreateParty = async (name) => {
+    const rec = await actions.saveParty({ name, type: "Both", phone: "", address: "", gstin: "", openingBalance: 0, notes: "" });
+    setPartyId(rec.id);
+    setPartyName(rec.name);
+  };
+  const save = async () => {
+    if (!partyId) {
+      toast("Pick a party (or add a new one)", "warn");
+      return;
+    }
+    if (n2(amount) <= 0) {
+      toast("Enter the total bill amount", "warn");
+      return;
+    }
+    setSaving(true);
+    try {
+      await actions.saveOpeningBalance({ type, partyId, partyName, billNo: billNo.trim(), date, amount: n2(amount), paidAmount: n2(paidAmount), notes });
+      setPartyName("");
+      setPartyId("");
+      setBillNo("");
+      setDate(today());
+      setAmount("");
+      setPaidAmount("");
+      setNotes("");
+      setTimeout(() => partyRef.current && partyRef.current.focus(), 30);
+    } catch (e) {
+      toast("Save failed: " + (e.message || e), "err");
+    }
+    setSaving(false);
+  };
+  const groups = useMemo(() => {
+    const byParty = {};
+    db.openingBalances.forEach((ob) => {
+      (byParty[ob.partyId] = byParty[ob.partyId] || { partyName: ob.partyName, rows: [] }).rows.push(ob);
+    });
+    return Object.values(byParty).map((g) => ({
+      ...g,
+      rows: [...g.rows].sort((a, b) => String(a.date).localeCompare(String(b.date))),
+      totalDue: g.rows.reduce((s, ob) => {
+        const due = n2(ob.amount) - n2(ob.paidAmount) - (derived.paidByRef[ob.id] || 0);
+        return s + (ob.type === "Purchase" ? -due : due);
+      }, 0)
+    })).sort((a, b) => a.partyName.localeCompare(b.partyName));
+  }, [db.openingBalances, derived]);
+  return /* @__PURE__ */ React.createElement("div", { className: "anim-in" }, /* @__PURE__ */ React.createElement(PageHead, { title: "Opening Bills", sub: "Seed old bills from before this system existed — never touches stock or P&L" }), /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800 p-4 mb-4" }, /* @__PURE__ */ React.createElement("h3", { className: "text-xs font-bold uppercase tracking-wide text-zinc-500 mb-3" }, "Add an old bill"), /* @__PURE__ */ React.createElement("div", { className: "grid md:grid-cols-3 gap-3 mb-3" }, /* @__PURE__ */ React.createElement(Field, { label: "Party *" }, /* @__PURE__ */ React.createElement(AutoComplete, { value: partyName, onChange: (v) => { setPartyName(v); setPartyId(""); }, options: partyOptions, onPick: (o) => { setPartyId(o.id); setPartyName(o.label); }, allowCreate: true, onCreate: quickCreateParty, inputRef: (el) => partyRef.current = el, placeholder: "Search or add party…" })), /* @__PURE__ */ React.createElement(Field, { label: "Type", hint: "Sale = they owe us \xB7 Purchase = we owe them" }, /* @__PURE__ */ React.createElement(Select, { value: type, onChange: (e) => setType(e.target.value) }, /* @__PURE__ */ React.createElement("option", { value: "Sale" }, "Sale (receivable)"), /* @__PURE__ */ React.createElement("option", { value: "Purchase" }, "Purchase (payable)"))), /* @__PURE__ */ React.createElement(Field, { label: "Old bill no" }, /* @__PURE__ */ React.createElement(Input, { value: billNo, onChange: (e) => setBillNo(e.target.value), placeholder: "Their original bill/invoice no" }))), /* @__PURE__ */ React.createElement("div", { className: "grid md:grid-cols-3 gap-3 mb-3" }, /* @__PURE__ */ React.createElement(Field, { label: "Bill date" }, /* @__PURE__ */ React.createElement(Input, { type: "date", value: date, onChange: (e) => setDate(e.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: `Total amount (${cur})` }, /* @__PURE__ */ React.createElement(Input, { value: amount, onChange: (e) => setAmount(e.target.value), inputMode: "decimal", placeholder: "0" })), /* @__PURE__ */ React.createElement(Field, { label: `Already paid (${cur})`, hint: "Money collected before this system started" }, /* @__PURE__ */ React.createElement(Input, { value: paidAmount, onChange: (e) => setPaidAmount(e.target.value), inputMode: "decimal", placeholder: "0" }))), /* @__PURE__ */ React.createElement(Field, { label: "Notes" }, /* @__PURE__ */ React.createElement(Input, { value: notes, onChange: (e) => setNotes(e.target.value), placeholder: "Optional…" })), /* @__PURE__ */ React.createElement(Btn, { kind: "brand", className: "mt-3", disabled: saving, onClick: save }, saving ? "Saving…" : "+ Add Opening Bill")), groups.length === 0 ? /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800" }, /* @__PURE__ */ React.createElement(Empty, { icon: "\u{1F4DC}", msg: "No opening bills seeded yet." })) : groups.map((g) => /* @__PURE__ */ React.createElement("div", { key: g.partyId, className: "mb-4" }, /* @__PURE__ */ React.createElement("div", { className: "flex justify-between items-center mb-2" }, /* @__PURE__ */ React.createElement("h3", { className: "font-bold text-sm text-zinc-100" }, g.partyName), /* @__PURE__ */ React.createElement("span", { className: `text-xs font-bold num ${g.totalDue > 0.01 ? "text-amber-400" : g.totalDue < -0.01 ? "text-red-400" : "text-zinc-500"}` }, Math.abs(g.totalDue) < 0.01 ? "Settled" : `${fmt(Math.abs(g.totalDue), cur)} ${g.totalDue > 0 ? "due from them" : "we owe them"}`)), /* @__PURE__ */ React.createElement(Table, { head: ["Type", "Bill No", "Date", { t: "Total", right: true }, { t: "Paid", right: true }, { t: "Due", right: true }, ""] }, g.rows.map((ob) => {
+    const due = n2(ob.amount) - n2(ob.paidAmount) - (derived.paidByRef[ob.id] || 0);
+    return /* @__PURE__ */ React.createElement("tr", { key: ob.id }, /* @__PURE__ */ React.createElement(Td, null, /* @__PURE__ */ React.createElement("span", { className: `px-2 py-0.5 rounded-full text-[10px] font-bold ${ob.type === "Sale" ? "bg-emerald-950/50 text-emerald-400" : "bg-blue-950/50 text-blue-400"}` }, ob.type)), /* @__PURE__ */ React.createElement(Td, { className: "font-semibold" }, ob.billNo || "—"), /* @__PURE__ */ React.createElement(Td, { className: "text-zinc-400 whitespace-nowrap" }, fdate(ob.date)), /* @__PURE__ */ React.createElement(Td, { right: true }, fmt(ob.amount, cur)), /* @__PURE__ */ React.createElement(Td, { right: true, className: "text-emerald-400" }, fmt(n2(ob.paidAmount) + (derived.paidByRef[ob.id] || 0), cur)), /* @__PURE__ */ React.createElement(Td, { right: true, className: due > 0.01 ? "font-bold text-amber-400" : "text-zinc-600" }, due > 0.01 ? fmt(due, cur) : "—"), /* @__PURE__ */ React.createElement(Td, { onClick: (e) => e.stopPropagation() }, /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "xs", className: "!text-red-400", onClick: () => setConfirm(ob) }, "\u{1F5D1}")));
+  })))), confirm && /* @__PURE__ */ React.createElement(Confirm, { msg: `Delete this opening bill for ${confirm.partyName}? This only affects seeded balances, not real invoices.`, onYes: () => actions.deleteOpeningBalance(confirm.id), onClose: () => setConfirm(null) }));
+}
+function PaymentsPage({ db, derived, actions, go, S, prefillInvoice }) {
+  const cur = S.currency;
+  const [modal, setModal] = useState(prefillInvoice ? { direction: "In", inv: prefillInvoice } : null);
+  const [confirm, setConfirm] = useState(null);
+  const [q, setQ] = useState("");
+  const rows = useMemo(() => {
+    let list = [...db.payments].sort((a, b) => String(b.date).localeCompare(String(a.date)));
+    if (q.trim()) {
+      const s = clamp(q);
+      list = list.filter((p) => clamp(p.partyName).includes(s) || clamp(p.mode).includes(s));
+    }
+    return list;
+  }, [db.payments, q]);
+  const totIn = rows.filter((p) => p.direction === "In").reduce((s, p) => s + n2(p.amount), 0);
+  const totOut = rows.filter((p) => p.direction === "Out").reduce((s, p) => s + n2(p.amount), 0);
+  return /* @__PURE__ */ React.createElement("div", { className: "anim-in" }, /* @__PURE__ */ React.createElement(PageHead, { title: "Payments", sub: `In ${fmt(totIn, cur)} \xB7 Out ${fmt(totOut, cur)}`, right: /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement(Btn, { kind: "brand", onClick: () => setModal({ direction: "In" }) }, "+ Receive"), /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", onClick: () => setModal({ direction: "Out" }) }, "\u2212 Pay Out"), /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", onClick: () => go("bulk-payment") }, "\u{1F4B8} Bulk Payment")) }), /* @__PURE__ */ React.createElement(Input, { value: q, onChange: (e) => setQ(e.target.value), placeholder: "\u{1F50D} Search party / mode\u2026", className: "!w-64 mb-3" }), rows.length === 0 ? /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800" }, /* @__PURE__ */ React.createElement(Empty, { icon: "\u{1F4B0}", msg: "No payments recorded yet." })) : /* @__PURE__ */ React.createElement(Table, { head: ["Date", "Party", "Type", "Ref", "Mode", { t: "Amount", right: true }, ""] }, rows.map((p) => {
+    const ref = p.refType === "Sale" ? db.invoices.find((i) => i.id === p.refId) : p.refType === "Purchase" ? db.purchases.find((x) => x.id === p.refId) : null;
+    return /* @__PURE__ */ React.createElement("tr", { key: p.id }, /* @__PURE__ */ React.createElement(Td, { className: "whitespace-nowrap text-zinc-400" }, fdate(p.date)), /* @__PURE__ */ React.createElement(Td, { className: "font-semibold" }, p.partyName || "\u2014"), /* @__PURE__ */ React.createElement(Td, null, /* @__PURE__ */ React.createElement("span", { className: `px-2 py-0.5 rounded-full text-[10px] font-bold ${p.direction === "In" ? "bg-emerald-950/50 text-emerald-400" : "bg-red-950/50 text-red-400"}` }, p.direction === "In" ? "RECEIVED" : "PAID")), /* @__PURE__ */ React.createElement(Td, { className: "text-zinc-400 text-xs" }, ref ? ref.invNo || ref.billNo : p.refType === "OnAccount" ? "On account" : "\u2014"), /* @__PURE__ */ React.createElement(Td, { className: "text-zinc-400" }, p.mode), /* @__PURE__ */ React.createElement(Td, { right: true, className: `font-bold ${p.direction === "In" ? "text-emerald-400" : "text-red-400"}` }, p.direction === "In" ? "+" : "\u2212", fmt(p.amount, cur)), /* @__PURE__ */ React.createElement(Td, null, /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "xs", className: "!text-red-400", onClick: () => setConfirm(p) }, "\u{1F5D1}")));
+  })), modal && /* @__PURE__ */ React.createElement(PaymentModal, { cfg: modal, db, derived, S, onSave: async (pm) => {
+    await actions.savePayment(pm);
+    setModal(null);
+  }, onClose: () => setModal(null) }), confirm && /* @__PURE__ */ React.createElement(Confirm, { msg: "Delete this payment? Party balance will change.", onYes: () => actions.deletePayment(confirm.id), onClose: () => setConfirm(null) }));
+}
+function PaymentModal({ cfg, db, derived, S, onSave, onClose }) {
+  const cur = S.currency;
+  const isIn = cfg.direction === "In";
+  const [partyName, setPartyName] = useState(cfg.inv ? cfg.inv.partyName : "");
+  const [partyId, setPartyId] = useState(cfg.inv ? cfg.inv.partyId : "");
+  const [refId, setRefId] = useState(cfg.inv ? cfg.inv.id : "");
+  const [amount, setAmount] = useState(cfg.inv ? String(Math.max(0, n2(cfg.inv.total) - (derived.paidByRef[cfg.inv.id] || 0))) : "");
+  const [mode, setMode] = useState(S.payModes[0] || "Cash");
+  const [date, setDate] = useState(today());
+  const partyOptions = useMemo(() => db.parties.map((p) => ({ id: p.id, label: p.name, sub: p.phone })), [db.parties]);
+  const openDocs = useMemo(() => {
+    if (!partyId) return [];
+    const docs = isIn ? db.invoices.filter((i) => i.partyId === partyId) : db.purchases.filter((p) => p.partyId === partyId);
+    return docs.map((d) => ({ ...d, due: n2(d.total) - (derived.paidByRef[d.id] || 0) })).filter((d) => d.due > 0.01).sort((a, b) => String(a.date).localeCompare(String(b.date)));
+  }, [partyId, db, derived, isIn]);
+  return /* @__PURE__ */ React.createElement(Modal, { title: isIn ? "Receive Payment" : "Pay Out", onClose }, /* @__PURE__ */ React.createElement("div", { className: "space-y-3" }, /* @__PURE__ */ React.createElement(Field, { label: "Party *" }, /* @__PURE__ */ React.createElement(
+    AutoComplete,
+    {
+      value: partyName,
+      onChange: (v) => {
+        setPartyName(v);
+        setPartyId("");
+        setRefId("");
+      },
+      options: partyOptions,
+      onPick: (o) => {
+        setPartyId(o.id);
+        setPartyName(o.label);
+        setRefId("");
+      },
+      placeholder: "Search party\u2026"
+    }
+  )), partyId && /* @__PURE__ */ React.createElement(Field, { label: isIn ? "Against invoice (optional)" : "Against bill (optional)" }, /* @__PURE__ */ React.createElement(Select, { value: refId, onChange: (e) => {
+    setRefId(e.target.value);
+    const d = openDocs.find((x) => x.id === e.target.value);
+    if (d) setAmount(String(d.due));
+  } }, /* @__PURE__ */ React.createElement("option", { value: "" }, "On account (no specific bill)"), openDocs.map((d) => /* @__PURE__ */ React.createElement("option", { key: d.id, value: d.id }, d.invNo || d.billNo, " \xB7 ", fdate(d.date), " \xB7 due ", fmt(d.due, cur))))), /* @__PURE__ */ React.createElement("div", { className: "grid grid-cols-3 gap-3" }, /* @__PURE__ */ React.createElement(Field, { label: `Amount (${cur}) *` }, /* @__PURE__ */ React.createElement(Input, { value: amount, onChange: (e) => setAmount(e.target.value), inputMode: "decimal", autoFocus: !cfg.inv })), /* @__PURE__ */ React.createElement(Field, { label: "Mode" }, /* @__PURE__ */ React.createElement(Select, { value: mode, onChange: (e) => setMode(e.target.value) }, S.payModes.map((m) => /* @__PURE__ */ React.createElement("option", { key: m }, m)))), /* @__PURE__ */ React.createElement(Field, { label: "Date" }, /* @__PURE__ */ React.createElement(Input, { type: "date", value: date, onChange: (e) => setDate(e.target.value) }))), /* @__PURE__ */ React.createElement("div", { className: "flex justify-end gap-2 pt-2" }, /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", onClick: onClose }, "Cancel"), /* @__PURE__ */ React.createElement(Btn, { kind: "brand", onClick: () => {
+    if (!partyId && !partyName.trim()) {
+      toast("Select a party", "warn");
+      return;
+    }
+    if (n2(amount) <= 0) {
+      toast("Enter an amount", "warn");
+      return;
+    }
+    onSave({ date, partyId, partyName, refType: refId ? isIn ? "Sale" : "Purchase" : "OnAccount", refId, amount: n2(amount), mode, direction: cfg.direction, notes: "" });
+  } }, isIn ? "Receive" : "Pay", " ", n2(amount) > 0 ? fmt(amount, cur) : ""))));
+}
+/**
+ * Bulk Payment Entry (Module 7): one amount handed over by/to a party, split across
+ * several of their open invoices/bills in one shot — the common case when a customer
+ * clears several old bills with a single cheque/transfer instead of one payment per
+ * bill. Auto-allocates oldest-first as soon as a total amount is entered (editable per
+ * line after that); any amount above what's actually due goes on account automatically
+ * rather than being silently dropped.
+ */
+function BulkPaymentPage({ db, derived, actions, go, S }) {
+  const cur = S.currency;
+  const [direction, setDirection] = useState("In");
+  const isIn = direction === "In";
+  const [partyName, setPartyName] = useState("");
+  const [partyId, setPartyId] = useState("");
+  const [date, setDate] = useState(today());
+  const [mode, setMode] = useState(S.payModes[0] || "Cash");
+  const [notes, setNotes] = useState("");
+  const [totalAmount, setTotalAmount] = useState("");
+  const [alloc, setAlloc] = useState({});
+  const [saving, setSaving] = useState(false);
+  const partyOptions = useMemo(() => db.parties.filter((p) => isIn ? p.type !== "Supplier" : p.type !== "Customer").map((p) => ({ id: p.id, label: p.name, sub: p.phone })), [db.parties, isIn]);
+  const openDocs = useMemo(() => {
+    if (!partyId) return [];
+    const docs = isIn ? db.invoices.filter((i) => i.partyId === partyId) : db.purchases.filter((p) => p.partyId === partyId);
+    return docs.map((d) => ({ id: d.id, no: d.invNo || d.billNo, date: d.date, due: n2(d.total) - (derived.paidByRef[d.id] || 0) })).filter((d) => d.due > 0.01).sort((a, b) => String(a.date).localeCompare(String(b.date)));
+  }, [partyId, db, derived, isIn]);
+  const pickParty = (id, name) => {
+    setPartyId(id);
+    setPartyName(name);
+    setAlloc({});
+  };
+  const autoAllocate = (amt) => {
+    let left = n2(amt);
+    const next = {};
+    openDocs.forEach((d) => {
+      const take = Math.max(0, Math.min(d.due, left));
+      if (take > 0) next[d.id] = String(take);
+      left -= take;
+    });
+    setAlloc(next);
+  };
+  const setTotal = (v) => {
+    setTotalAmount(v);
+    autoAllocate(v);
+  };
+  const setLine = (id, v, max) => {
+    const capped = v === "" ? "" : String(Math.min(Math.max(n2(v), 0), max));
+    setAlloc((a) => ({ ...a, [id]: capped }));
+  };
+  const allocated = Object.values(alloc).reduce((s, v) => s + n2(v), 0);
+  const onAccount = Math.max(0, n2(totalAmount) - allocated);
+  const overAllocated = allocated > n2(totalAmount) + 0.01;
+  const save = async () => {
+    if (!partyId) {
+      toast("Select a party", "warn");
+      return;
+    }
+    if (n2(totalAmount) <= 0) {
+      toast("Enter the amount received", "warn");
+      return;
+    }
+    if (overAllocated) {
+      toast("Allocated amount exceeds the total entered", "warn");
+      return;
+    }
+    setSaving(true);
+    try {
+      const allocations = openDocs.filter((d) => n2(alloc[d.id]) > 0).map((d) => ({ refType: isIn ? "Sale" : "Purchase", refId: d.id, amount: n2(alloc[d.id]) }));
+      await actions.saveBulkPayment({ date, partyId, partyName, mode, direction, notes, allocations, onAccountAmount: onAccount });
+      go("payments");
+    } catch (e) {
+      toast("Save failed: " + (e.message || e), "err");
+    }
+    setSaving(false);
+  };
+  return /* @__PURE__ */ React.createElement("div", { className: "anim-in" }, /* @__PURE__ */ React.createElement(PageHead, { title: "Bulk Payment Entry", sub: "One amount, split across several open bills at once", right: /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "sm", onClick: () => go("payments") }, "← Payments") }), /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800 p-4 mb-3" }, /* @__PURE__ */ React.createElement("div", { className: "flex gap-2 mb-3" }, /* @__PURE__ */ React.createElement(Btn, { kind: isIn ? "brand" : "ghost", size: "sm", onClick: () => { setDirection("In"); setPartyId(""); setPartyName(""); setAlloc({}); } }, "Receive (Customer)"), /* @__PURE__ */ React.createElement(Btn, { kind: !isIn ? "brand" : "ghost", size: "sm", onClick: () => { setDirection("Out"); setPartyId(""); setPartyName(""); setAlloc({}); } }, "Pay Out (Supplier)")), /* @__PURE__ */ React.createElement("div", { className: "grid md:grid-cols-4 gap-3" }, /* @__PURE__ */ React.createElement(Field, { label: isIn ? "Customer *" : "Supplier *" }, /* @__PURE__ */ React.createElement(
+    AutoComplete,
+    {
+      value: partyName,
+      onChange: (v) => {
+        setPartyName(v);
+        setPartyId("");
+      },
+      options: partyOptions,
+      onPick: (o) => pickParty(o.id, o.label),
+      placeholder: isIn ? "Search customer…" : "Search supplier…"
+    }
+  )), /* @__PURE__ */ React.createElement(Field, { label: "Date" }, /* @__PURE__ */ React.createElement(Input, { type: "date", value: date, onChange: (e) => setDate(e.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Mode" }, /* @__PURE__ */ React.createElement(Select, { value: mode, onChange: (e) => setMode(e.target.value) }, S.payModes.map((m) => /* @__PURE__ */ React.createElement("option", { key: m }, m)))), /* @__PURE__ */ React.createElement(Field, { label: `Total amount (${cur}) *` }, /* @__PURE__ */ React.createElement(Input, { value: totalAmount, onChange: (e) => setTotal(e.target.value), inputMode: "decimal", placeholder: "0", disabled: !partyId })))), partyId && /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800 p-4 mb-3" }, openDocs.length === 0 ? /* @__PURE__ */ React.createElement(Empty, { icon: "✅", msg: `No open ${isIn ? "invoices" : "bills"} for this party — the full amount will be recorded on account.` }) : /* @__PURE__ */ React.createElement(Table, { head: [isIn ? "Invoice" : "Bill", "Date", { t: "Due", right: true }, { t: "Allocate", right: true }] }, openDocs.map((d) => /* @__PURE__ */ React.createElement("tr", { key: d.id }, /* @__PURE__ */ React.createElement(Td, { className: "font-semibold" }, d.no), /* @__PURE__ */ React.createElement(Td, { className: "text-zinc-400 whitespace-nowrap" }, fdate(d.date)), /* @__PURE__ */ React.createElement(Td, { right: true }, fmt(d.due, cur)), /* @__PURE__ */ React.createElement(Td, { right: true }, /* @__PURE__ */ React.createElement("input", { value: alloc[d.id] ?? "", onChange: (e) => setLine(d.id, e.target.value, d.due), inputMode: "decimal", className: "w-24 px-2 py-1 text-right text-sm bg-zinc-800 border border-zinc-700 text-zinc-100 rounded-md focus:border-red-500 focus:ring-2 focus:ring-red-500/30 num", placeholder: "0" }))))), /* @__PURE__ */ React.createElement("div", { className: "flex flex-wrap items-center justify-between gap-3 mt-3 pt-3 border-t border-zinc-800" }, /* @__PURE__ */ React.createElement("div", { className: "text-sm text-zinc-400" }, "Allocated ", /* @__PURE__ */ React.createElement("b", { className: `num ${overAllocated ? "text-red-400" : "text-zinc-100"}` }, fmt(allocated, cur)), " \xB7 On account ", /* @__PURE__ */ React.createElement("b", { className: "num text-emerald-400" }, fmt(onAccount, cur))), /* @__PURE__ */ React.createElement(Btn, { kind: "brand", disabled: saving || n2(totalAmount) <= 0 || overAllocated, onClick: save }, saving ? "Saving…" : `Save \xB7 ${fmt(n2(totalAmount), cur)}`))));
+}
+function ReportsPage({ db, derived, S, tab: initTab, partyId: initParty }) {
+  const cur = S.currency;
+  const [tab, setTab] = useState(initTab || "pnl");
+  const [from, setFrom] = useState(monthKey(today()) + "-01");
+  const [to, setTo] = useState(today());
+  const [ledgerParty, setLedgerParty] = useState(initParty || "");
+  const inRange = (d) => {
+    const dd = String(d).slice(0, 10);
+    return (!from || dd >= from) && (!to || dd <= to);
+  };
+  const invs = db.invoices.filter((i) => inRange(i.date));
+  const purs = db.purchases.filter((p) => inRange(p.date));
+  const TABS = [["pnl", "P&L"], ["sales", "Sales"], ["purchase", "Purchase"], ["ledger", "Party Ledger"], ["stock", "Stock"], ["outstanding", "Outstanding"]];
+  return /* @__PURE__ */ React.createElement("div", { className: "anim-in" }, /* @__PURE__ */ React.createElement(PageHead, { title: "Reports", right: /* @__PURE__ */ React.createElement("div", { className: "flex gap-2 items-center" }, /* @__PURE__ */ React.createElement(Input, { type: "date", value: from, onChange: (e) => setFrom(e.target.value), className: "!w-auto" }), /* @__PURE__ */ React.createElement("span", { className: "text-xs text-zinc-500" }, "to"), /* @__PURE__ */ React.createElement(Input, { type: "date", value: to, onChange: (e) => setTo(e.target.value), className: "!w-auto" })) }), /* @__PURE__ */ React.createElement("div", { className: "flex gap-1 border-b-2 border-zinc-800 mb-4 overflow-x-auto" }, TABS.map(([id, lbl]) => /* @__PURE__ */ React.createElement("button", { key: id, onClick: () => setTab(id), className: `px-4 py-2 text-sm font-semibold whitespace-nowrap -mb-0.5 border-b-2 transition ${tab === id ? "border-red-500 text-red-400" : "border-transparent text-zinc-500 hover:text-zinc-300"}` }, lbl))), tab === "pnl" && /* @__PURE__ */ React.createElement(PnLReport, { invs, purs, derived, db, cur, S }), tab === "sales" && /* @__PURE__ */ React.createElement(SalesReport, { invs, derived, cur }), tab === "purchase" && /* @__PURE__ */ React.createElement(PurchaseReport, { purs, derived, cur }), tab === "ledger" && /* @__PURE__ */ React.createElement(LedgerReport, { db, derived, cur, ledgerParty, setLedgerParty, inRange }), tab === "stock" && /* @__PURE__ */ React.createElement(StockReport, { db, derived, cur }), tab === "outstanding" && /* @__PURE__ */ React.createElement(OutstandingReport, { db, derived, cur }));
+}
+function PnLReport({ invs, purs, derived, db, cur, S }) {
+  const data = useMemo(() => {
+    let revenue = 0, discount = 0, tax = 0, cogs = 0, missingCost = 0;
+    const byItem = {};
+    invs.forEach((inv) => {
+      revenue += n2(inv.subTotal);
+      discount += n2(inv.discount);
+      tax += n2(inv.taxAmt);
+      (derived.linesByInvoice[inv.id] || []).forEach((l) => {
+        const lineCost = n2(l.cost) * n2(l.qty);
+        cogs += lineCost;
+        if (n2(l.cost) === 0) missingCost += 1;
+        const k = l.name;
+        byItem[k] = byItem[k] || { name: k, qty: 0, sales: 0, cost: 0 };
+        byItem[k].qty += n2(l.qty);
+        byItem[k].sales += n2(l.amount);
+        byItem[k].cost += lineCost;
+      });
+    });
+    const netRevenue = revenue - discount;
+    const grossProfit = netRevenue - cogs;
+    const purchases = purs.reduce((s, p) => s + n2(p.total), 0);
+    const items = Object.values(byItem).map((i) => ({ ...i, profit: i.sales - i.cost, marginPct: i.sales > 0 ? (i.sales - i.cost) / i.sales * 100 : 0 })).sort((a, b) => b.profit - a.profit);
+    return { revenue, discount, netRevenue, tax, cogs, grossProfit, purchases, items, missingCost };
+  }, [invs, purs, derived]);
+  return /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("div", { className: "grid grid-cols-2 md:grid-cols-4 gap-3 mb-4" }, /* @__PURE__ */ React.createElement(StatCard, { label: "Net Revenue", value: fmt(data.netRevenue, cur), sub: `after ${fmt(data.discount, cur)} discount` }), /* @__PURE__ */ React.createElement(StatCard, { label: "Cost of Goods (COGS)", value: fmt(data.cogs, cur), tone: "red" }), /* @__PURE__ */ React.createElement(StatCard, { label: "Gross Profit", value: fmt(data.grossProfit, cur), tone: data.grossProfit >= 0 ? "green" : "red", sub: data.netRevenue > 0 ? (data.grossProfit / data.netRevenue * 100).toFixed(1) + "% margin" : "" }), /* @__PURE__ */ React.createElement(StatCard, { label: "Purchases (period)", value: fmt(data.purchases, cur), tone: "blue", sub: "cash-flow view" })), data.missingCost > 0 && /* @__PURE__ */ React.createElement("div", { className: "mb-3 text-xs bg-amber-950/30 border border-amber-900/50 rounded-lg px-3 py-2 text-amber-400" }, "\u26A0 ", data.missingCost, " sale line(s) had no cost recorded \u2014 profit is overstated for those. Set purchase rates on items, or record purchases first."), data.items.length > 0 && /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800 p-4 mb-4" }, /* @__PURE__ */ React.createElement("h3", { className: "font-bold text-sm text-zinc-100 mb-3" }, "Top items by profit"), /* @__PURE__ */ React.createElement(BarChart, { data: data.items.slice(0, 8).map((i) => ({ label: i.name, value: i.profit })), cur })), /* @__PURE__ */ React.createElement("div", { className: "flex items-center justify-between mb-2" }, /* @__PURE__ */ React.createElement("h3", { className: "font-bold text-sm text-zinc-100" }, "Item-wise profit"), data.items.length > 0 && /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "xs", onClick: () => downloadCsv(`pnl_${today()}.csv`, data.items, ["name", "qty", "sales", "cost", "profit", "marginPct"]) }, "\u2B07 Export CSV")), data.items.length === 0 ? /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800" }, /* @__PURE__ */ React.createElement(Empty, { icon: "\u{1F4CA}", msg: "No sales in this period." })) : /* @__PURE__ */ React.createElement(
+    Table,
+    {
+      head: ["Item", { t: "Qty Sold", right: true }, { t: "Sales", right: true }, { t: "Cost", right: true }, { t: "Profit", right: true }, { t: "Margin %", right: true }],
+      foot: /* @__PURE__ */ React.createElement("tr", null, /* @__PURE__ */ React.createElement(Td, { className: "font-bold" }, "TOTAL"), /* @__PURE__ */ React.createElement(Td, { right: true }, fq(data.items.reduce((s, i) => s + i.qty, 0))), /* @__PURE__ */ React.createElement(Td, { right: true }, fmt(data.items.reduce((s, i) => s + i.sales, 0), cur)), /* @__PURE__ */ React.createElement(Td, { right: true }, fmt(data.cogs, cur)), /* @__PURE__ */ React.createElement(Td, { right: true, className: data.grossProfit >= 0 ? "text-emerald-400" : "text-red-400" }, fmt(data.grossProfit, cur)), /* @__PURE__ */ React.createElement(Td, { right: true }, data.netRevenue > 0 ? (data.grossProfit / data.netRevenue * 100).toFixed(1) + "%" : "\u2014"))
+    },
+    data.items.map((i) => /* @__PURE__ */ React.createElement("tr", { key: i.name }, /* @__PURE__ */ React.createElement(Td, { className: "font-medium" }, i.name), /* @__PURE__ */ React.createElement(Td, { right: true }, fq(i.qty)), /* @__PURE__ */ React.createElement(Td, { right: true }, fmt(i.sales, cur)), /* @__PURE__ */ React.createElement(Td, { right: true, className: "text-zinc-400" }, fmt(i.cost, cur)), /* @__PURE__ */ React.createElement(Td, { right: true, className: `font-bold ${i.profit >= 0 ? "text-emerald-400" : "text-red-400"}` }, fmt(i.profit, cur)), /* @__PURE__ */ React.createElement(Td, { right: true, className: i.marginPct < 0 ? "text-red-400" : "" }, i.marginPct.toFixed(1), "%")))
+  ));
+}
+function SalesReport({ invs, derived, cur }) {
+  const byMonth = {};
+  invs.forEach((i) => {
+    const k = monthKey(i.date);
+    byMonth[k] = byMonth[k] || { total: 0, count: 0, paid: 0 };
+    byMonth[k].total += n2(i.total);
+    byMonth[k].count++;
+    byMonth[k].paid += derived.paidByRef[i.id] || 0;
+  });
+  const months = Object.entries(byMonth).sort((a, b) => b[0].localeCompare(a[0]));
+  const csvRows = months.map(([m, d]) => ({ month: m, invoices: d.count, sales: d.total, collected: d.paid, pending: d.total - d.paid }));
+  return months.length === 0 ? /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800" }, /* @__PURE__ */ React.createElement(Empty, { icon: "\u{1F9FE}", msg: "No sales in this period." })) : /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800 p-4 mb-4" }, /* @__PURE__ */ React.createElement("h3", { className: "font-bold text-sm text-zinc-100 mb-3" }, "Sales by month"), /* @__PURE__ */ React.createElement(BarChart, { data: [...months].reverse().map(([m, d]) => ({ label: m, value: d.total })), cur })), /* @__PURE__ */ React.createElement("div", { className: "flex items-center justify-end mb-2" }, /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "xs", onClick: () => downloadCsv(`sales_${today()}.csv`, csvRows, ["month", "invoices", "sales", "collected", "pending"]) }, "⬇ Export CSV")), /* @__PURE__ */ React.createElement(Table, { head: ["Month", { t: "Invoices", right: true }, { t: "Sales", right: true }, { t: "Collected", right: true }, { t: "Pending", right: true }] }, months.map(([m, d]) => /* @__PURE__ */ React.createElement("tr", { key: m }, /* @__PURE__ */ React.createElement(Td, { className: "font-semibold" }, m), /* @__PURE__ */ React.createElement(Td, { right: true }, d.count), /* @__PURE__ */ React.createElement(Td, { right: true, className: "font-bold" }, fmt(d.total, cur)), /* @__PURE__ */ React.createElement(Td, { right: true, className: "text-emerald-400" }, fmt(d.paid, cur)), /* @__PURE__ */ React.createElement(Td, { right: true, className: "text-amber-400" }, fmt(d.total - d.paid, cur))))));
+}
+function PurchaseReport({ purs, derived, cur }) {
+  const byParty = {};
+  purs.forEach((p) => {
+    const k = p.partyName || "\u2014";
+    byParty[k] = byParty[k] || { total: 0, count: 0, paid: 0 };
+    byParty[k].total += n2(p.total);
+    byParty[k].count++;
+    byParty[k].paid += derived.paidByRef[p.id] || 0;
+  });
+  const rows = Object.entries(byParty).sort((a, b) => b[1].total - a[1].total);
+  const csvRows = rows.map(([name, d]) => ({ supplier: name, bills: d.count, total: d.total, paid: d.paid, payable: d.total - d.paid }));
+  return rows.length === 0 ? /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800" }, /* @__PURE__ */ React.createElement(Empty, { icon: "\u{1F4E6}", msg: "No purchases in this period." })) : /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("div", { className: "flex items-center justify-end mb-2" }, /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "xs", onClick: () => downloadCsv(`purchases_${today()}.csv`, csvRows, ["supplier", "bills", "total", "paid", "payable"]) }, "⬇ Export CSV")), /* @__PURE__ */ React.createElement(Table, { head: ["Supplier", { t: "Bills", right: true }, { t: "Total", right: true }, { t: "Paid", right: true }, { t: "Payable", right: true }] }, rows.map(([name, d]) => /* @__PURE__ */ React.createElement("tr", { key: name }, /* @__PURE__ */ React.createElement(Td, { className: "font-semibold" }, name), /* @__PURE__ */ React.createElement(Td, { right: true }, d.count), /* @__PURE__ */ React.createElement(Td, { right: true, className: "font-bold" }, fmt(d.total, cur)), /* @__PURE__ */ React.createElement(Td, { right: true, className: "text-emerald-400" }, fmt(d.paid, cur)), /* @__PURE__ */ React.createElement(Td, { right: true, className: "text-red-400" }, fmt(d.total - d.paid, cur))))));
+}
+/**
+ * Shared by the Party Ledger report tab AND the Party Detail page's Ledger
+ * tab, so the two views can never drift out of sync with each other — one
+ * function computing "what does this party owe/get owed", reused everywhere
+ * that needs it, per the app's no-duplicate-logic rule.
+ */
+function buildLedgerEntries(party, db, inRange) {
+  if (!party) return [];
+  const rows = [];
+  db.invoices.filter((i) => i.partyId === party.id && inRange(i.date)).forEach((i) => rows.push({ date: i.date, ref: i.invNo, desc: "Sale invoice", dr: n2(i.total), cr: 0 }));
+  db.purchases.filter((p) => p.partyId === party.id && inRange(p.date)).forEach((p) => rows.push({ date: p.date, ref: p.billNo, desc: "Purchase bill", dr: 0, cr: n2(p.total) }));
+  db.payments.filter((pm) => pm.partyId === party.id && inRange(pm.date)).forEach((pm) => rows.push({
+    date: pm.date,
+    ref: pm.mode,
+    desc: pm.direction === "In" ? "Payment received" : "Payment made",
+    dr: pm.direction === "Out" ? n2(pm.amount) : 0,
+    cr: pm.direction === "In" ? n2(pm.amount) : 0
+  }));
+  // Opening balances: shown net of their own paidAmount (money collected before this system
+  // existed) so the running balance is correct from day one; any payment collected AFTER
+  // seeding is a normal Payments row (already included just above) against this bill's id.
+  db.openingBalances.filter((ob) => ob.partyId === party.id && inRange(ob.date)).forEach((ob) => {
+    const net = n2(ob.amount) - n2(ob.paidAmount);
+    rows.push({
+      date: ob.date,
+      ref: ob.billNo || "Opening",
+      desc: `Opening balance (${ob.type})`,
+      dr: ob.type === "Sale" ? net : 0,
+      cr: ob.type === "Purchase" ? net : 0
+    });
+  });
+  rows.sort((a, b) => String(a.date).localeCompare(String(b.date)));
+  let bal = n2(party.openingBalance);
+  return rows.map((r) => {
+    bal += r.dr - r.cr;
+    return { ...r, bal };
+  });
+}
+/**
+ * Stock Ledger (Module 8): every movement of one item's stock, oldest first, with a
+ * running balance — the inventory equivalent of buildLedgerEntries above. `item.stock`
+ * is always the current total (adjustStock_ mutates it directly on every save), so the
+ * opening point is reverse-derived as current stock minus every movement below, rather
+ * than stored anywhere — there's no separate "opening stock" transaction to look up.
+ */
+function buildStockLedgerEntries(item, db, derived) {
+  if (!item) return { opening: 0, rows: [] };
+  const rows = [];
+  db.purchases.forEach((p) => (derived.linesByPurchase[p.id] || []).forEach((l) => {
+    if (l.itemId === item.id) rows.push({ date: p.date, ref: p.billNo, desc: "Purchase", qty: n2(l.qty) });
+  }));
+  db.invoices.forEach((inv) => (derived.linesByInvoice[inv.id] || []).forEach((l) => {
+    if (l.itemId === item.id) rows.push({ date: inv.date, ref: inv.invNo, desc: "Sale", qty: -n2(l.qty) });
+  }));
+  db.salesReturns.forEach((sr) => (derived.linesBySalesReturn[sr.id] || []).forEach((l) => {
+    if (l.itemId === item.id) rows.push({ date: sr.date, ref: sr.srNo, desc: "Sales Return", qty: n2(l.qty) });
+  }));
+  db.purchaseReturns.forEach((pr) => (derived.linesByPurchaseReturn[pr.id] || []).forEach((l) => {
+    if (l.itemId === item.id) rows.push({ date: pr.date, ref: pr.prNo, desc: "Purchase Return", qty: -n2(l.qty) });
+  }));
+  rows.sort((a, b) => String(a.date).localeCompare(String(b.date)));
+  const opening = n2(item.stock) - rows.reduce((s, r) => s + r.qty, 0);
+  let bal = opening;
+  return { opening, rows: rows.map((r) => { bal += r.qty; return { ...r, bal }; }) };
+}
+function ItemLedgerModal({ item, db, derived, cur, onClose }) {
+  const { opening, rows } = useMemo(() => buildStockLedgerEntries(item, db, derived), [item, db, derived]);
+  return /* @__PURE__ */ React.createElement(Modal, { title: `Stock Ledger — ${item.name}`, onClose, wide: true }, /* @__PURE__ */ React.createElement("div", { className: "flex justify-between items-center mb-2 text-sm" }, /* @__PURE__ */ React.createElement("div", { className: "text-zinc-500 text-xs" }, "Opening stock: ", /* @__PURE__ */ React.createElement("b", { className: "text-zinc-300" }, fq(opening), " ", item.unit)), /* @__PURE__ */ React.createElement("div", { className: "font-bold" }, "Current: ", /* @__PURE__ */ React.createElement("span", { className: "num text-zinc-100" }, fq(item.stock), " ", item.unit))), rows.length === 0 ? /* @__PURE__ */ React.createElement(Empty, { icon: "\u{1F3F7}️", msg: "No stock movements recorded for this item yet." }) : /* @__PURE__ */ React.createElement(Table, { head: ["Date", "Ref", "Type", { t: "In", right: true }, { t: "Out", right: true }, { t: "Balance", right: true }] }, rows.map((r, i) => /* @__PURE__ */ React.createElement("tr", { key: i }, /* @__PURE__ */ React.createElement(Td, { className: "whitespace-nowrap text-zinc-400" }, fdate(r.date)), /* @__PURE__ */ React.createElement(Td, { className: "text-xs" }, r.ref), /* @__PURE__ */ React.createElement(Td, null, r.desc), /* @__PURE__ */ React.createElement(Td, { right: true, className: "text-emerald-400" }, r.qty > 0 ? fq(r.qty) : "—"), /* @__PURE__ */ React.createElement(Td, { right: true, className: "text-red-400" }, r.qty < 0 ? fq(-r.qty) : "—"), /* @__PURE__ */ React.createElement(Td, { right: true, className: "font-bold" }, fq(r.bal))))));
+}
+function LedgerReport({ db, derived, cur, ledgerParty, setLedgerParty, inRange }) {
+  const party = db.parties.find((p) => p.id === ledgerParty);
+  const entries = useMemo(() => buildLedgerEntries(party, db, inRange), [party, db, inRange]);
+  return /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("div", { className: "mb-3 max-w-sm" }, /* @__PURE__ */ React.createElement(
+    AutoComplete,
+    {
+      value: party ? party.name : "",
+      onChange: () => setLedgerParty(""),
+      options: db.parties.map((p) => ({ id: p.id, label: p.name, sub: p.phone })),
+      onPick: (o) => setLedgerParty(o.id),
+      placeholder: "Select a party to view ledger\u2026"
+    }
+  )), !party ? /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800" }, /* @__PURE__ */ React.createElement(Empty, { icon: "\u{1F4D2}", msg: "Pick a party above to see their full ledger." })) : /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("div", { className: "flex justify-between items-center mb-2 text-sm" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("b", null, party.name), " ", /* @__PURE__ */ React.createElement("span", { className: "text-zinc-500 text-xs" }, "Opening: ", fmt(party.openingBalance, cur))), /* @__PURE__ */ React.createElement("div", { className: "font-bold" }, "Closing: ", /* @__PURE__ */ React.createElement("span", { className: `num ${entries.length && entries[entries.length - 1].bal > 0 ? "text-amber-400" : "text-emerald-400"}` }, fmt(entries.length ? entries[entries.length - 1].bal : party.openingBalance, cur)))), /* @__PURE__ */ React.createElement(Table, { head: ["Date", "Ref", "Description", { t: "Debit", right: true }, { t: "Credit", right: true }, { t: "Balance", right: true }] }, entries.map((e, i) => /* @__PURE__ */ React.createElement("tr", { key: i }, /* @__PURE__ */ React.createElement(Td, { className: "whitespace-nowrap text-zinc-400" }, fdate(e.date)), /* @__PURE__ */ React.createElement(Td, { className: "text-xs" }, e.ref), /* @__PURE__ */ React.createElement(Td, null, e.desc), /* @__PURE__ */ React.createElement(Td, { right: true }, e.dr > 0 ? fmt(e.dr, cur) : "\u2014"), /* @__PURE__ */ React.createElement(Td, { right: true }, e.cr > 0 ? fmt(e.cr, cur) : "\u2014"), /* @__PURE__ */ React.createElement(Td, { right: true, className: `font-bold ${e.bal > 0.01 ? "text-amber-400" : e.bal < -0.01 ? "text-red-400" : ""}` }, fmt(e.bal, cur)))))));
+}
+function StockReport({ db, derived, cur }) {
+  const [ledgerItem, setLedgerItem] = useState(null);
+  const rows = [...db.items].sort((a, b) => n2(b.stock) * n2(b.purchaseRate) - n2(a.stock) * n2(a.purchaseRate));
+  const totalVal = rows.reduce((s, i) => s + n2(i.stock) * n2(i.purchaseRate), 0);
+  const csvRows = rows.map((i) => ({ name: i.name, brand: i.brand, category: i.category, stock: i.stock, costPerUnit: i.purchaseRate, stockValue: n2(i.stock) * n2(i.purchaseRate) }));
+  return rows.length === 0 ? /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800" }, /* @__PURE__ */ React.createElement(Empty, { icon: "\u{1F3F7}\uFE0F", msg: "No items yet." })) : /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("div", { className: "flex items-center justify-end mb-2" }, /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "xs", onClick: () => downloadCsv(`stock_${today()}.csv`, csvRows, ["name", "brand", "category", "stock", "costPerUnit", "stockValue"]) }, "\u2B07 Export CSV")), /* @__PURE__ */ React.createElement(
+    Table,
+    {
+      head: ["Item", "Brand", { t: "Stock", right: true }, { t: "Cost/unit", right: true }, { t: "Stock Value", right: true }],
+      foot: /* @__PURE__ */ React.createElement("tr", null, /* @__PURE__ */ React.createElement(Td, { className: "font-bold", colSpan: 4 }, "TOTAL STOCK VALUE (at cost)"), /* @__PURE__ */ React.createElement(Td, { right: true }, fmt(totalVal, cur)))
+    },
+    rows.map((i) => /* @__PURE__ */ React.createElement("tr", { key: i.id, className: "hover:bg-zinc-800/60 cursor-pointer", onClick: () => setLedgerItem(i) }, /* @__PURE__ */ React.createElement(Td, { className: "font-medium" }, i.name), /* @__PURE__ */ React.createElement(Td, { className: "text-zinc-400" }, i.brand || "\u2014"), /* @__PURE__ */ React.createElement(Td, { right: true, className: n2(i.minStock) > 0 && n2(i.stock) <= n2(i.minStock) ? "text-red-400 font-bold" : "font-semibold" }, fq(i.stock), " ", i.unit), /* @__PURE__ */ React.createElement(Td, { right: true }, fmt(i.purchaseRate, cur)), /* @__PURE__ */ React.createElement(Td, { right: true, className: "font-bold" }, fmt(n2(i.stock) * n2(i.purchaseRate), cur))))
+  ), /* @__PURE__ */ React.createElement("p", { className: "text-[11px] text-zinc-500 mt-2" }, "Click a row to see its full stock ledger."), ledgerItem && /* @__PURE__ */ React.createElement(ItemLedgerModal, { item: ledgerItem, db, derived, cur, onClose: () => setLedgerItem(null) }));
+}
+function OutstandingReport({ db, derived, cur }) {
+  const rows = useMemo(() => {
+    const tk = new Date(today());
+    const invRows = db.invoices.map((i) => ({ id: i.id, label: i.invNo, date: i.date, partyName: i.partyName, total: n2(i.total), due: n2(i.total) - (derived.paidByRef[i.id] || 0) }));
+    // Opening balances (Module 3) are old bills entered before this system existed \u2014 a
+    // Sale-type one is exactly as much a receivable as a real invoice, so it belongs in
+    // the same aging list, not a separate report the owner has to remember to check.
+    const obRows = db.openingBalances.filter((ob) => ob.type === "Sale").map((ob) => ({ id: ob.id, label: `${ob.billNo || "\u2014"} (Opening)`, date: ob.date, partyName: ob.partyName, total: n2(ob.amount), due: n2(ob.amount) - n2(ob.paidAmount) - (derived.paidByRef[ob.id] || 0) }));
+    return [...invRows, ...obRows].filter((r) => r.due > 0.01).map((r) => ({ ...r, days: Math.floor((tk - new Date(String(r.date).slice(0, 10))) / 864e5) })).sort((a, b) => b.days - a.days);
+  }, [db, derived]);
+  const bucket = (d) => d <= 15 ? "0\u201315" : d <= 30 ? "16\u201330" : d <= 60 ? "31\u201360" : "60+";
+  const buckets = { "0\u201315": 0, "16\u201330": 0, "31\u201360": 0, "60+": 0 };
+  rows.forEach((r) => buckets[bucket(r.days)] += r.due);
+  const csvRows = rows.map((r) => ({ invoice: r.label, date: r.date, party: r.partyName, days: r.days, total: r.total, due: r.due }));
+  return /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("div", { className: "grid grid-cols-2 md:grid-cols-4 gap-3 mb-4" }, Object.entries(buckets).map(([b, v]) => /* @__PURE__ */ React.createElement(StatCard, { key: b, label: `${b} days`, value: fmt(v, cur), tone: b === "60+" ? "red" : b === "31\u201360" ? "amber" : "ink" }))), rows.length === 0 ? /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800" }, /* @__PURE__ */ React.createElement(Empty, { icon: "\u2705", msg: "Nothing outstanding \u2014 all invoices paid!" })) : /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800 p-4 mb-4" }, /* @__PURE__ */ React.createElement("h3", { className: "font-bold text-sm text-zinc-100 mb-3" }, "Due by age bucket"), /* @__PURE__ */ React.createElement(BarChart, { data: Object.entries(buckets).map(([b, v]) => ({ label: `${b} days`, value: v })), cur })), /* @__PURE__ */ React.createElement("div", { className: "flex items-center justify-end mb-2" }, /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "xs", onClick: () => downloadCsv(`outstanding_${today()}.csv`, csvRows, ["invoice", "date", "party", "days", "total", "due"]) }, "\u2b07 Export CSV")), /* @__PURE__ */ React.createElement(Table, { head: ["Invoice", "Date", "Party", { t: "Days", right: true }, { t: "Total", right: true }, { t: "Due", right: true }, "Age"] }, rows.map((i) => /* @__PURE__ */ React.createElement("tr", { key: i.id }, /* @__PURE__ */ React.createElement(Td, { className: "font-semibold" }, i.label), /* @__PURE__ */ React.createElement(Td, { className: "text-zinc-400 whitespace-nowrap" }, fdate(i.date)), /* @__PURE__ */ React.createElement(Td, null, i.partyName), /* @__PURE__ */ React.createElement(Td, { right: true }, i.days), /* @__PURE__ */ React.createElement(Td, { right: true }, fmt(i.total, cur)), /* @__PURE__ */ React.createElement(Td, { right: true, className: "font-bold text-amber-400" }, fmt(i.due, cur)), /* @__PURE__ */ React.createElement(Td, null, /* @__PURE__ */ React.createElement("span", { className: `px-2 py-0.5 rounded-full text-[10px] font-bold ${i.days > 60 ? "bg-red-950/50 text-red-400" : i.days > 30 ? "bg-amber-950/50 text-amber-400" : "bg-zinc-800 text-zinc-400"}` }, bucket(i.days))))))));
+}
+/**
+ * Admin & Roles (Module 10). Deliberately just two roles (Owner/Staff) and a flat list —
+ * a small trading business doesn't need a permissions matrix. This is a workflow layer,
+ * not a security boundary: anyone with edit access to the underlying Google Sheet can
+ * already open the Apps Script editor and read/change anything, same as any script bound
+ * to a Sheet. What it actually buys: the Owner decides who sees Settings/Admin in the UI,
+ * using the real identity Session.getActiveUser() already gives Apps Script for free — no
+ * separate login system to build. apiSaveUser/apiDeleteUser re-check Owner-ness server
+ * side too (see requireOwner_ in Code.gs), so this page's own gating below is
+ * belt-and-suspenders, not the only thing stopping a Staff account from editing roles.
+ */
+function AdminPage({ db, actions, isOwner }) {
+  const [email, setEmail] = useState("");
+  const [confirm, setConfirm] = useState(null);
+  const owners = db.users.filter((u) => u.role === "Owner" && u.active !== false);
+  if (!isOwner) {
+    return /* @__PURE__ */ React.createElement("div", { className: "anim-in" }, /* @__PURE__ */ React.createElement(PageHead, { title: "Admin & Roles" }), /* @__PURE__ */ React.createElement(Empty, { icon: "\u{1F512}", msg: "Only an Owner can manage users and roles." }));
+  }
+  const addUser = async () => {
+    if (!email.trim()) {
+      toast("Enter an email", "warn");
+      return;
+    }
+    if (db.users.some((u) => clamp(u.email) === clamp(email))) {
+      toast("That email is already listed", "warn");
+      return;
+    }
+    try {
+      await actions.saveUser({ id: "", email: email.trim(), name: "", role: "Staff", active: true });
+      setEmail("");
+    } catch (e) {
+      toast("Save failed: " + (e.message || e), "err");
+    }
+  };
+  const setRole = async (u, role) => {
+    try {
+      await actions.saveUser({ ...u, role });
+    } catch (e) {
+      toast("Save failed: " + (e.message || e), "err");
+    }
+  };
+  const toggleActive = async (u) => {
+    try {
+      await actions.saveUser({ ...u, active: !u.active });
+    } catch (e) {
+      toast("Save failed: " + (e.message || e), "err");
+    }
+  };
+  return /* @__PURE__ */ React.createElement("div", { className: "anim-in" }, /* @__PURE__ */ React.createElement(PageHead, { title: "Admin & Roles", sub: "Who sees Settings and this screen — not a login system; Sheet sharing is still the real access control." }), /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800 p-4 mb-4 max-w-lg" }, /* @__PURE__ */ React.createElement("h3", { className: "text-xs font-bold uppercase tracking-wide text-zinc-500 mb-3" }, "Add a user"), /* @__PURE__ */ React.createElement("div", { className: "flex gap-2" }, /* @__PURE__ */ React.createElement(Input, { value: email, onChange: (e) => setEmail(e.target.value), placeholder: "name@company.com", className: "flex-1" }), /* @__PURE__ */ React.createElement(Btn, { kind: "brand", onClick: addUser }, "+ Add as Staff")), /* @__PURE__ */ React.createElement("p", { className: "text-[11px] text-zinc-500 mt-2" }, "They must already have edit access to this Google Sheet — this just decides what they see once they open the app.")), /* @__PURE__ */ React.createElement(Table, { head: ["Email", "Role", "Status", ""] }, db.users.map((u) => {
+    const isLastOwner = u.role === "Owner" && u.active !== false && owners.length <= 1;
+    return /* @__PURE__ */ React.createElement("tr", { key: u.id }, /* @__PURE__ */ React.createElement(Td, { className: "font-semibold" }, u.email, u.email === db.currentUser.email && /* @__PURE__ */ React.createElement("span", { className: "ml-2 text-[10px] text-zinc-500" }, "(you)")), /* @__PURE__ */ React.createElement(Td, null, /* @__PURE__ */ React.createElement(Select, { value: u.role, disabled: isLastOwner, onChange: (e) => setRole(u, e.target.value), className: "!w-auto" }, /* @__PURE__ */ React.createElement("option", null, "Owner"), /* @__PURE__ */ React.createElement("option", null, "Staff"))), /* @__PURE__ */ React.createElement(Td, null, /* @__PURE__ */ React.createElement("span", { className: `px-2 py-0.5 rounded-full text-[10px] font-bold ${u.active !== false ? "bg-emerald-950/50 text-emerald-400" : "bg-zinc-800 text-zinc-400"}` }, u.active !== false ? "ACTIVE" : "INACTIVE")), /* @__PURE__ */ React.createElement(Td, null, /* @__PURE__ */ React.createElement("div", { className: "flex gap-1 justify-end" }, /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "xs", disabled: isLastOwner, onClick: () => toggleActive(u) }, u.active !== false ? "Deactivate" : "Reactivate"), /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "xs", className: "!text-red-400", disabled: isLastOwner, onClick: () => setConfirm(u) }, "\u{1F5D1}"))));
+  })), confirm && /* @__PURE__ */ React.createElement(Confirm, { msg: `Remove ${confirm.email}? They'll lose access to Settings/Admin (their Sheet access is unaffected).`, onYes: () => actions.deleteUser(confirm.id), onClose: () => setConfirm(null) }));
+}
+function SettingsPage({ db, actions, S, isOwner }) {
+  const [f, setF] = useState({ ...S });
+  const [unitsText, setUnitsText] = useState((S.units || []).join(", "));
+  const [modesText, setModesText] = useState((S.payModes || []).join(", "));
+  const set = (k, v) => setF((x) => ({ ...x, [k]: v }));
+  if (!isOwner) {
+    return /* @__PURE__ */ React.createElement("div", { className: "anim-in" }, /* @__PURE__ */ React.createElement(PageHead, { title: "Settings" }), /* @__PURE__ */ React.createElement(Empty, { icon: "\u{1F512}", msg: "Only an Owner can view Settings. Ask an Owner to change this for you." }));
+  }
+  const save = () => {
+    const clean = {
+      ...f,
+      taxPct: n2(f.taxPct),
+      units: unitsText.split(",").map((s) => s.trim()).filter(Boolean),
+      payModes: modesText.split(",").map((s) => s.trim()).filter(Boolean)
+    };
+    if (!clean.units.length) clean.units = ["Pcs"];
+    if (!clean.payModes.length) clean.payModes = ["Cash"];
+    actions.saveSettings(clean);
+  };
+  const Sec = ({ title, children }) => /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800 p-4 mb-4" }, /* @__PURE__ */ React.createElement("h3", { className: "text-xs font-bold uppercase tracking-wide text-zinc-500 mb-3" }, title), children);
+  return /* @__PURE__ */ React.createElement("div", { className: "anim-in max-w-2xl" }, /* @__PURE__ */ React.createElement(PageHead, { title: "Settings", right: /* @__PURE__ */ React.createElement(Btn, { kind: "brand", onClick: save }, "Save Settings") }), /* @__PURE__ */ React.createElement(Sec, { title: "Business profile (shown on invoices)" }, /* @__PURE__ */ React.createElement("div", { className: "space-y-3" }, /* @__PURE__ */ React.createElement(Field, { label: "Business name" }, /* @__PURE__ */ React.createElement(Input, { value: f.bizName, onChange: (e) => set("bizName", e.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Tagline" }, /* @__PURE__ */ React.createElement(Input, { value: f.bizTagline, onChange: (e) => set("bizTagline", e.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Address" }, /* @__PURE__ */ React.createElement(Input, { value: f.bizAddress, onChange: (e) => set("bizAddress", e.target.value) })), /* @__PURE__ */ React.createElement("div", { className: "grid grid-cols-2 gap-3" }, /* @__PURE__ */ React.createElement(Field, { label: "Phone" }, /* @__PURE__ */ React.createElement(Input, { value: f.bizPhone, onChange: (e) => set("bizPhone", e.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Email" }, /* @__PURE__ */ React.createElement(Input, { value: f.bizEmail, onChange: (e) => set("bizEmail", e.target.value) }))), /* @__PURE__ */ React.createElement(Field, { label: "GSTIN (optional)" }, /* @__PURE__ */ React.createElement(Input, { value: f.bizGstin, onChange: (e) => set("bizGstin", e.target.value) })))), /* @__PURE__ */ React.createElement(Sec, { title: "Billing" }, /* @__PURE__ */ React.createElement("div", { className: "grid grid-cols-2 gap-3 mb-3" }, /* @__PURE__ */ React.createElement(Field, { label: "Invoice number prefix" }, /* @__PURE__ */ React.createElement(Input, { value: f.invPrefix, onChange: (e) => set("invPrefix", e.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Purchase bill prefix" }, /* @__PURE__ */ React.createElement(Input, { value: f.purPrefix, onChange: (e) => set("purPrefix", e.target.value) }))), /* @__PURE__ */ React.createElement("div", { className: "grid grid-cols-2 md:grid-cols-4 gap-3 mb-3" }, /* @__PURE__ */ React.createElement(Field, { label: "Quotation prefix" }, /* @__PURE__ */ React.createElement(Input, { value: f.quoPrefix, onChange: (e) => set("quoPrefix", e.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Sales Order prefix" }, /* @__PURE__ */ React.createElement(Input, { value: f.soPrefix, onChange: (e) => set("soPrefix", e.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Sales Return prefix" }, /* @__PURE__ */ React.createElement(Input, { value: f.srPrefix, onChange: (e) => set("srPrefix", e.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Purchase Return prefix" }, /* @__PURE__ */ React.createElement(Input, { value: f.prPrefix, onChange: (e) => set("prPrefix", e.target.value) }))), /* @__PURE__ */ React.createElement("div", { className: "grid grid-cols-3 gap-3 mb-3" }, /* @__PURE__ */ React.createElement(Field, { label: "Currency symbol" }, /* @__PURE__ */ React.createElement(Input, { value: f.currency, onChange: (e) => set("currency", e.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Tax label" }, /* @__PURE__ */ React.createElement(Input, { value: f.taxLabel, onChange: (e) => set("taxLabel", e.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Tax %" }, /* @__PURE__ */ React.createElement(Input, { value: f.taxPct, onChange: (e) => set("taxPct", e.target.value), inputMode: "decimal" }))), /* @__PURE__ */ React.createElement("label", { className: "flex items-center gap-2 text-sm mb-3" }, /* @__PURE__ */ React.createElement("input", { type: "checkbox", checked: !!f.taxEnabled, onChange: (e) => set("taxEnabled", e.target.checked) }), " Tax ON by default for new invoices"), /* @__PURE__ */ React.createElement("label", { className: "flex items-center gap-2 text-sm" }, /* @__PURE__ */ React.createElement("input", { type: "checkbox", checked: !!f.lowStockAlert, onChange: (e) => set("lowStockAlert", e.target.checked) }), " Show low-stock alerts on dashboard")), /* @__PURE__ */ React.createElement(Sec, { title: "Customisation" }, /* @__PURE__ */ React.createElement("div", { className: "space-y-3" }, /* @__PURE__ */ React.createElement(Field, { label: "Units (comma separated)" }, /* @__PURE__ */ React.createElement(Input, { value: unitsText, onChange: (e) => setUnitsText(e.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Payment modes (comma separated)" }, /* @__PURE__ */ React.createElement(Input, { value: modesText, onChange: (e) => setModesText(e.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Invoice footer note" }, /* @__PURE__ */ React.createElement(Input, { value: f.invoiceFooter, onChange: (e) => set("invoiceFooter", e.target.value) })))), /* @__PURE__ */ React.createElement(Sec, { title: "Data" }, /* @__PURE__ */ React.createElement("div", { className: "flex flex-wrap gap-2" }, /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", onClick: () => exportCSV(db, S) }, "\u2B07 Export all data (CSV)"), /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", onClick: actions.reload }, "\u21BB Reload from Google Sheets")), /* @__PURE__ */ React.createElement("p", { className: "text-[11px] text-zinc-500 mt-2" }, IS_GAS ? "Your Google Sheet IS your backup \u2014 every record lives there. You can also use File \u2192 Make a copy in Sheets for snapshots." : "Local preview mode: data is in this browser only. Deploy to Apps Script to store in Google Sheets.")));
+}
+const csvEsc_ = (v) => `"${String(v != null ? v : "").replace(/"/g, '""')}"`;
+/** Turns one array of row-objects into a downloadable CSV \u2014 the building block behind
+ * both the whole-database export below and each Reports tab's own "Export CSV" button
+ * (Module 11), so there's exactly one place that knows how to escape/quote a CSV cell. */
+function downloadCsv(filename, rows, cols) {
+  if (!rows.length) {
+    toast("Nothing to export in this view", "warn");
+    return;
+  }
+  const csv = [cols.join(","), ...rows.map((r) => cols.map((c) => csvEsc_(r[c])).join(","))].join("\n");
+  const blob = new Blob(["\uFEFF" + csv], { type: "text/csv" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  a.click();
+  toast("CSV exported");
+}
+function exportCSV(db, S) {
+  const sect = (title, rows, cols) => [title, cols.join(","), ...rows.map((r) => cols.map((c) => csvEsc_(r[c])).join(","))].join("\n");
+  const csv = [
+    sect("ITEMS", db.items, ["name", "brand", "category", "unit", "stock", "purchaseRate", "saleRate"]),
+    sect("PARTIES", db.parties, ["name", "type", "phone", "address", "openingBalance"]),
+    sect("INVOICES", db.invoices, ["invNo", "date", "partyName", "subTotal", "discount", "taxAmt", "total", "billType", "dispatchStatus"]),
+    sect("PURCHASES", db.purchases, ["billNo", "date", "partyName", "total", "supplierInvoiceNo"]),
+    sect("PAYMENTS", db.payments, ["date", "partyName", "direction", "amount", "mode", "refType"]),
+    sect("QUOTATIONS", db.quotations, ["quoNo", "date", "partyName", "total", "status"]),
+    sect("SALES ORDERS", db.salesOrders, ["soNo", "date", "partyName", "total", "status"]),
+    sect("SALES RETURNS", db.salesReturns, ["srNo", "date", "partyName", "total"]),
+    sect("PURCHASE RETURNS", db.purchaseReturns, ["prNo", "date", "partyName", "total"]),
+    sect("OPENING BALANCES", db.openingBalances, ["type", "partyName", "billNo", "date", "amount", "paidAmount"]),
+    sect("FOLLOW-UPS", db.followups, ["partyName", "dueDate", "note", "status"])
+  ].join("\n\n");
+  const blob = new Blob(["\uFEFF" + csv], { type: "text/csv" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `${(S.bizName || "erp").replace(/\s+/g, "_")}_export_${today()}.csv`;
+  a.click();
+  toast("CSV exported");
+}
+function buildInvoiceHtml(inv, lines, S, party) {
+  const cur = S.currency;
+  const rows = lines.map((l, i) => `
+    <tr>
+      <td style="padding:5px 8px;border-bottom:1px solid #eee;text-align:center">${i + 1}</td>
+      <td style="padding:5px 8px;border-bottom:1px solid #eee"><b>${l.name}</b>${l.brand ? ` <span style="color:#777;font-size:11px">(${l.brand})</span>` : ""}</td>
+      <td style="padding:5px 8px;border-bottom:1px solid #eee;text-align:center">${l.packing || "\u2014"}</td>
+      <td style="padding:5px 8px;border-bottom:1px solid #eee;text-align:center">${n2(l.packs) || "\u2014"}</td>
+      <td style="padding:5px 8px;border-bottom:1px solid #eee;text-align:right">${fq(l.qty)}</td>
+      <td style="padding:5px 8px;border-bottom:1px solid #eee;text-align:right">${fq(l.rate)}</td>
+      <td style="padding:5px 8px;border-bottom:1px solid #eee;text-align:right"><b>${fq(l.amount)}</b></td>
+    </tr>`).join("");
+  return `
+    <div style="font-family:Arial,sans-serif;color:#111;max-width:800px;margin:0 auto">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;border-bottom:3px solid #dc2626;padding-bottom:12px;margin-bottom:14px">
+        <div>
+          <div style="font-size:26px;font-weight:900;letter-spacing:.5px">${/^XL\s/i.test(S.bizName || "") ? '<span style="color:#dc2626">XL</span> ' + S.bizName.replace(/^XL\s*/i, "") : S.bizName || ""}</div>
+          <div style="font-size:11px;color:#555;margin-top:2px">${S.bizTagline || ""}</div>
+          <div style="font-size:11px;color:#555;margin-top:4px">${S.bizAddress || ""}</div>
+          <div style="font-size:11px;color:#555">\u{1F4DE} ${S.bizPhone || ""} ${S.bizEmail ? " \xB7 \u2709 " + S.bizEmail : ""}</div>
+          ${S.bizGstin ? `<div style="font-size:11px;color:#555">GSTIN: ${S.bizGstin}</div>` : ""}
+        </div>
+        <div style="text-align:right">
+          <div style="font-size:18px;font-weight:800;color:#dc2626">TAX INVOICE</div>
+          <div style="font-size:13px;margin-top:6px"><b>${inv.invNo}</b></div>
+          <div style="font-size:12px;color:#555">${fdate(inv.date)}</div>
+        </div>
+      </div>
+      <div style="margin-bottom:12px;font-size:12px">
+        <div style="color:#777;font-size:10px;text-transform:uppercase;letter-spacing:1px">Bill To</div>
+        <div style="font-size:14px;font-weight:700">${inv.partyName || "Cash Sale"}</div>
+        ${party && party.address ? `<div style="color:#555">${party.address}</div>` : ""}
+        ${party && party.phone ? `<div style="color:#555">\u{1F4DE} ${party.phone}</div>` : ""}
+        ${party && party.gstin ? `<div style="color:#555">GSTIN: ${party.gstin}</div>` : ""}
+      </div>
+      <table style="width:100%;border-collapse:collapse;font-size:12px">
+        <thead><tr style="background:#f3f4f6">
+          <th style="padding:6px 8px;text-align:center;border-bottom:2px solid #ddd">Sr</th>
+          <th style="padding:6px 8px;text-align:left;border-bottom:2px solid #ddd">Item Description</th>
+          <th style="padding:6px 8px;text-align:center;border-bottom:2px solid #ddd">Packing</th>
+          <th style="padding:6px 8px;text-align:center;border-bottom:2px solid #ddd">Packs</th>
+          <th style="padding:6px 8px;text-align:right;border-bottom:2px solid #ddd">Qty</th>
+          <th style="padding:6px 8px;text-align:right;border-bottom:2px solid #ddd">Rate</th>
+          <th style="padding:6px 8px;text-align:right;border-bottom:2px solid #ddd">Amount</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      <div style="display:flex;justify-content:flex-end;margin-top:12px">
+        <table style="font-size:12px;min-width:240px">
+          <tr><td style="padding:3px 8px;color:#555">Sub Total</td><td style="padding:3px 8px;text-align:right">${cur}${fq(inv.subTotal)}</td></tr>
+          ${n2(inv.discount) > 0 ? `<tr><td style="padding:3px 8px;color:#555">Discount</td><td style="padding:3px 8px;text-align:right">\u2212${cur}${fq(inv.discount)}</td></tr>` : ""}
+          ${n2(inv.taxAmt) > 0 ? `<tr><td style="padding:3px 8px;color:#555">${S.taxLabel} ${inv.taxPct}%</td><td style="padding:3px 8px;text-align:right">${cur}${fq(inv.taxAmt)}</td></tr>` : ""}
+          <tr><td style="padding:6px 8px;font-weight:900;font-size:15px;border-top:2px solid #111">TOTAL</td><td style="padding:6px 8px;text-align:right;font-weight:900;font-size:15px;border-top:2px solid #111">${cur}${fq(inv.total)}</td></tr>
+        </table>
+      </div>
+      <div style="margin-top:28px;display:flex;justify-content:space-between;align-items:flex-end;font-size:11px;color:#555">
+        <div>${S.invoiceFooter || ""}</div>
+        <div style="text-align:center"><div style="border-top:1px solid #999;padding-top:4px;min-width:160px">Authorised Signatory</div></div>
+      </div>
+    </div>`;
+}
+function printInvoice(inv, lines, S, party) {
+  document.getElementById("print-area").innerHTML = buildInvoiceHtml(inv, lines, S, party);
+  setTimeout(() => window.print(), 150);
+}
+/** India-first WhatsApp share of an invoice summary — GAS cannot send WhatsApp
+ * messages itself, so this just opens a pre-filled wa.me chat for a manual send. */
+function invoiceWhatsAppLink(inv, S, party) {
+  const msg = `Hi ${inv.partyName}, your invoice ${inv.invNo} dated ${fdate(inv.date)} for ${fmt(inv.total, S.currency)} is ready.${S.invoiceFooter ? " " + S.invoiceFooter : ""} — ${S.bizName}`;
+  const digits = party && party.phone ? String(party.phone).replace(/\D/g, "") : "";
+  const target = digits.length === 10 ? "91" + digits : digits;
+  return `https://wa.me/${target}?text=${encodeURIComponent(msg)}`;
+}
+/**
+ * Download an invoice as a real PDF via GAS's HTML→PDF blob conversion
+ * (Utilities.newBlob(html).getAs('application/pdf')) — no third-party library needed.
+ * Local-preview mode has no GAS runtime to do that conversion, so it falls back to
+ * the print dialog (which already offers "Save as PDF") instead of silently failing.
+ */
+async function downloadInvoicePdf(inv, lines, S, party) {
+  const html = `<!DOCTYPE html><html><head><meta charset="utf-8"></head><body>${buildInvoiceHtml(inv, lines, S, party)}</body></html>`;
+  try {
+    const res = await gs("apiHtmlToPdf", JSON.stringify({ html, filename: `${inv.invNo}.pdf` }));
+    if (!res.base64) {
+      toast("PDF needs the deployed Google Sheets app — printing instead", "warn");
+      printInvoice(inv, lines, S, party);
+      return;
+    }
+    const byteChars = atob(res.base64);
+    const bytes = new Uint8Array(byteChars.length);
+    for (let i = 0; i < byteChars.length; i++) bytes[i] = byteChars.charCodeAt(i);
+    const blob = new Blob([bytes], { type: "application/pdf" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${inv.invNo}.pdf`;
+    a.click();
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    toast("PDF download failed: " + (e.message || e), "err");
+  }
+}
+class ErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { error: null };
+  }
+  static getDerivedStateFromError(error) {
+    return { error };
+  }
+  componentDidCatch(error, info) {
+    console.error("[ErrorBoundary]", error, info);
+  }
+  render() {
+    if (this.state.error) {
+      return /* @__PURE__ */ React.createElement("div", { className: "min-h-screen flex items-center justify-center p-6" }, /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-2xl border border-red-900/40 p-8 max-w-lg text-center" }, /* @__PURE__ */ React.createElement("div", { className: "text-3xl mb-2" }, "\u26A0\uFE0F"), /* @__PURE__ */ React.createElement("h2", { className: "font-bold text-zinc-100 mb-1" }, "Something broke in the app"), /* @__PURE__ */ React.createElement("p", { className: "text-sm text-zinc-400 mb-3 font-mono break-words" }, String(this.state.error.message || this.state.error)), /* @__PURE__ */ React.createElement("button", { onClick: () => this.setState({ error: null }), className: "px-4 py-2 bg-red-600 text-white rounded-lg text-sm font-semibold" }, "Try again")));
+    }
+    return this.props.children;
+  }
+}
+ReactDOM.createRoot(document.getElementById("root")).render(/* @__PURE__ */ React.createElement(ErrorBoundary, null, /* @__PURE__ */ React.createElement(App, null)));
+
