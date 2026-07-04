@@ -136,6 +136,7 @@ function mockDB() {
     quotations: [], quotationItems: [], salesOrders: [], salesOrderItems: [], salesReturns: [], salesReturnItems: [],
     dispatchLog: [],
     purchaseReturns: [], purchaseReturnItems: [],
+    followups: [],
     counters: { INV: 0, PUR: 0, QUO: 0, SO: 0, SR: 0, PR: 0 }
   };
 }
@@ -190,6 +191,7 @@ async function mockServer(fn, args) {
       if (!db.dispatchLog) db.dispatchLog = [];
       if (!db.purchaseReturns) db.purchaseReturns = [];
       if (!db.purchaseReturnItems) db.purchaseReturnItems = [];
+      if (!db.followups) db.followups = [];
       if (!db.counters.PR) db.counters.PR = 0;
       if (!db.counters.QUO) db.counters.QUO = 0;
       if (!db.counters.SO) db.counters.SO = 0;
@@ -328,6 +330,18 @@ async function mockServer(fn, args) {
     }
     case "apiDeleteOpeningBalance":
       db.openingBalances = db.openingBalances.filter((x) => x.id !== args[0]);
+      mockSave(db);
+      return { ok: true };
+    case "apiSaveFollowup": {
+      const r = parse(args[0]);
+      if (!r.id) { r.id = uid(); r.createdAt = (/* @__PURE__ */ new Date()).toISOString(); }
+      const i = db.followups.findIndex((x) => x.id === r.id);
+      i >= 0 ? db.followups[i] = r : db.followups.push(r);
+      mockSave(db);
+      return { ok: true, record: r };
+    }
+    case "apiDeleteFollowup":
+      db.followups = db.followups.filter((x) => x.id !== args[0]);
       mockSave(db);
       return { ok: true };
     case "apiMarkConverted": {
@@ -829,7 +843,8 @@ const NAV = [
     { id: "new-sale", icon: "\u{1F9FE}", label: "New Sale" },
     { id: "sales", icon: "\u{1F4CB}", label: "Sales List" },
     { id: "payments", icon: "\u{1F4B0}", label: "Payments" },
-    { id: "bulk-payment", icon: "\u{1F4B8}", label: "Bulk Payment" }
+    { id: "bulk-payment", icon: "\u{1F4B8}", label: "Bulk Payment" },
+    { id: "followups", icon: "\u{1F4C5}", label: "Follow-ups" }
   ] },
   { sec: "SALES SUITE", items: [
     { id: "quotations", icon: "\u{1F4C4}", label: "Quotations" },
@@ -1013,6 +1028,24 @@ function App() {
       });
       await gs("apiDeleteOpeningBalance", id);
       toast("Opening bill deleted");
+    },
+    saveFollowup: async (f) => {
+      const res = await gs("apiSaveFollowup", JSON.stringify(f));
+      mutate((d) => {
+        const i = d.followups.findIndex((x) => x.id === res.record.id);
+        i >= 0 ? d.followups[i] = res.record : d.followups.push(res.record);
+        return d;
+      });
+      toast("Follow-up saved");
+      return res.record;
+    },
+    deleteFollowup: async (id) => {
+      mutate((d) => {
+        d.followups = d.followups.filter((x) => x.id !== id);
+        return d;
+      });
+      await gs("apiDeleteFollowup", id);
+      toast("Follow-up deleted");
     },
     saveQuotation: async (payload) => {
       const res = await gs("apiSaveQuotation", JSON.stringify(payload));
@@ -1311,6 +1344,7 @@ function App() {
     "sales": /* @__PURE__ */ React.createElement(SalesList, { ...ctx, ...pageProps }),
     "payments": /* @__PURE__ */ React.createElement(PaymentsPage, { ...ctx, ...pageProps }),
     "bulk-payment": /* @__PURE__ */ React.createElement(BulkPaymentPage, { ...ctx }),
+    "followups": /* @__PURE__ */ React.createElement(FollowupsPage, { ...ctx }),
     "new-purchase": /* @__PURE__ */ React.createElement(NewPurchase, { ...ctx, ...pageProps, key: pageProps.editId || "newp" }),
     "purchases": /* @__PURE__ */ React.createElement(PurchaseList, { ...ctx }),
     "purchase-returns": /* @__PURE__ */ React.createElement(PurchaseReturnsList, { ...ctx }),
@@ -1371,10 +1405,11 @@ function Dashboard({ db, derived, go, S }) {
     // already gone out, cash terms, still unpaid — which is harder to collect than a
     // normal receivable and deserves separate, more urgent visibility.
     const cashRisk = db.invoices.filter((i) => i.billType === "Cash" && i.dispatchStatus === "Dispatched" && n2(i.total) - (derived.paidByRef[i.id] || 0) > 0.01);
-    return { todaySales, monthSales, monthPur, receivable, payable, cashIn, lowStock, pendingDispatch, cashRisk };
+    const followupsDue = db.followups.filter((f) => f.status !== "Done" && f.dueDate <= tk).sort((a, b) => String(a.dueDate).localeCompare(String(b.dueDate)));
+    return { todaySales, monthSales, monthPur, receivable, payable, cashIn, lowStock, pendingDispatch, cashRisk, followupsDue };
   }, [db, derived]);
   const recentInv = [...db.invoices].sort((a, b) => String(b.createdAt || b.date).localeCompare(String(a.createdAt || a.date))).slice(0, 6);
-  return /* @__PURE__ */ React.createElement("div", { className: "anim-in" }, /* @__PURE__ */ React.createElement(PageHead, { title: "Dashboard", sub: fdate(tk), right: /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement(Btn, { kind: "brand", onClick: () => go("new-sale") }, "+ New Sale"), /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", onClick: () => go("new-purchase") }, "+ Purchase")) }), /* @__PURE__ */ React.createElement("div", { className: "grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 mb-5" }, /* @__PURE__ */ React.createElement(StatCard, { label: "Today's Sales", value: fmt(stats.todaySales, cur), tone: "green" }), /* @__PURE__ */ React.createElement(StatCard, { label: "Cash In Today", value: fmt(stats.cashIn, cur), tone: "blue" }), /* @__PURE__ */ React.createElement(StatCard, { label: "This Month Sales", value: fmt(stats.monthSales, cur) }), /* @__PURE__ */ React.createElement(StatCard, { label: "This Month Purchase", value: fmt(stats.monthPur, cur) }), /* @__PURE__ */ React.createElement(StatCard, { label: "To Receive", value: fmt(stats.receivable, cur), tone: "amber", sub: "from customers" }), /* @__PURE__ */ React.createElement(StatCard, { label: "To Pay", value: fmt(stats.payable, cur), tone: "red", sub: "to suppliers" })), S.lowStockAlert && stats.lowStock.length > 0 && /* @__PURE__ */ React.createElement("div", { className: "mb-5 bg-amber-950/30 border border-amber-900/50 rounded-xl p-4" }, /* @__PURE__ */ React.createElement("div", { className: "text-sm font-bold text-amber-400 mb-1.5" }, "\u26A0\uFE0F Low stock \u2014 ", stats.lowStock.length, " item", stats.lowStock.length > 1 ? "s" : ""), /* @__PURE__ */ React.createElement("div", { className: "flex flex-wrap gap-2" }, stats.lowStock.slice(0, 8).map((i) => /* @__PURE__ */ React.createElement("span", { key: i.id, className: "text-xs bg-amber-950/40 border border-amber-800 rounded-full px-2.5 py-1 text-amber-400" }, i.name, " \xB7 ", /* @__PURE__ */ React.createElement("b", { className: "num" }, fq(i.stock)), " ", i.unit)), stats.lowStock.length > 8 && /* @__PURE__ */ React.createElement("button", { className: "text-xs text-amber-400 underline", onClick: () => go("items") }, "view all"))), (stats.pendingDispatch.length > 0 || stats.cashRisk.length > 0) && /* @__PURE__ */ React.createElement("div", { className: "grid md:grid-cols-2 gap-4 mb-5" }, stats.pendingDispatch.length > 0 && /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800 p-4" }, /* @__PURE__ */ React.createElement("div", { className: "flex items-center justify-between mb-2" }, /* @__PURE__ */ React.createElement("h3", { className: "font-bold text-sm text-zinc-100" }, "\u{1F69A} Goods Pending Dispatch \u2014 ", stats.pendingDispatch.length), /* @__PURE__ */ React.createElement("button", { className: "text-xs font-semibold text-red-400", onClick: () => go("sales", { pill: "pending-dispatch" }) }, "View all \u2192")), stats.pendingDispatch.slice(0, 4).map((inv) => /* @__PURE__ */ React.createElement("div", { key: inv.id, className: "flex items-center justify-between py-1.5 text-sm border-b border-zinc-800 last:border-0" }, /* @__PURE__ */ React.createElement("span", { className: "text-zinc-300" }, inv.invNo, " \xB7 ", inv.partyName), /* @__PURE__ */ React.createElement("span", { className: "num font-semibold text-zinc-400" }, fmt(inv.total, cur))))), stats.cashRisk.length > 0 && /* @__PURE__ */ React.createElement("div", { className: "bg-red-950/30 rounded-xl border border-red-900/50 p-4" }, /* @__PURE__ */ React.createElement("div", { className: "flex items-center justify-between mb-2" }, /* @__PURE__ */ React.createElement("h3", { className: "font-bold text-sm text-red-400" }, "\u26A0\uFE0F Cash Sales \u2014 Payment Not Received \u2014 ", stats.cashRisk.length), /* @__PURE__ */ React.createElement("button", { className: "text-xs font-semibold text-red-400", onClick: () => go("sales") }, "View \u2192")), /* @__PURE__ */ React.createElement("p", { className: "text-[11px] text-red-400/80 mb-2" }, "Goods already dispatched on cash terms, still unpaid \u2014 harder to collect than a normal credit sale."), stats.cashRisk.slice(0, 4).map((inv) => /* @__PURE__ */ React.createElement("div", { key: inv.id, className: "flex items-center justify-between py-1.5 text-sm border-b border-red-900/40 last:border-0" }, /* @__PURE__ */ React.createElement("span", { className: "text-red-200" }, inv.invNo, " \xB7 ", inv.partyName), /* @__PURE__ */ React.createElement("span", { className: "num font-bold text-red-400" }, fmt(n2(inv.total) - (derived.paidByRef[inv.id] || 0), cur)))))), /* @__PURE__ */ React.createElement("div", { className: "grid md:grid-cols-2 gap-4" }, /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800 p-4" }, /* @__PURE__ */ React.createElement("div", { className: "flex items-center justify-between mb-3" }, /* @__PURE__ */ React.createElement("h3", { className: "font-bold text-sm text-zinc-100" }, "Recent invoices"), /* @__PURE__ */ React.createElement("button", { className: "text-xs font-semibold text-red-400", onClick: () => go("sales") }, "View all \u2192")), recentInv.length === 0 ? /* @__PURE__ */ React.createElement(Empty, { icon: "\u{1F9FE}", msg: "No invoices yet. Create your first sale!", action: /* @__PURE__ */ React.createElement(Btn, { kind: "brand", size: "sm", onClick: () => go("new-sale") }, "New Sale") }) : recentInv.map((inv) => {
+  return /* @__PURE__ */ React.createElement("div", { className: "anim-in" }, /* @__PURE__ */ React.createElement(PageHead, { title: "Dashboard", sub: fdate(tk), right: /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement(Btn, { kind: "brand", onClick: () => go("new-sale") }, "+ New Sale"), /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", onClick: () => go("new-purchase") }, "+ Purchase")) }), /* @__PURE__ */ React.createElement("div", { className: "grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 mb-5" }, /* @__PURE__ */ React.createElement(StatCard, { label: "Today's Sales", value: fmt(stats.todaySales, cur), tone: "green" }), /* @__PURE__ */ React.createElement(StatCard, { label: "Cash In Today", value: fmt(stats.cashIn, cur), tone: "blue" }), /* @__PURE__ */ React.createElement(StatCard, { label: "This Month Sales", value: fmt(stats.monthSales, cur) }), /* @__PURE__ */ React.createElement(StatCard, { label: "This Month Purchase", value: fmt(stats.monthPur, cur) }), /* @__PURE__ */ React.createElement(StatCard, { label: "To Receive", value: fmt(stats.receivable, cur), tone: "amber", sub: "from customers" }), /* @__PURE__ */ React.createElement(StatCard, { label: "To Pay", value: fmt(stats.payable, cur), tone: "red", sub: "to suppliers" })), S.lowStockAlert && stats.lowStock.length > 0 && /* @__PURE__ */ React.createElement("div", { className: "mb-5 bg-amber-950/30 border border-amber-900/50 rounded-xl p-4" }, /* @__PURE__ */ React.createElement("div", { className: "text-sm font-bold text-amber-400 mb-1.5" }, "\u26A0\uFE0F Low stock \u2014 ", stats.lowStock.length, " item", stats.lowStock.length > 1 ? "s" : ""), /* @__PURE__ */ React.createElement("div", { className: "flex flex-wrap gap-2" }, stats.lowStock.slice(0, 8).map((i) => /* @__PURE__ */ React.createElement("span", { key: i.id, className: "text-xs bg-amber-950/40 border border-amber-800 rounded-full px-2.5 py-1 text-amber-400" }, i.name, " \xB7 ", /* @__PURE__ */ React.createElement("b", { className: "num" }, fq(i.stock)), " ", i.unit)), stats.lowStock.length > 8 && /* @__PURE__ */ React.createElement("button", { className: "text-xs text-amber-400 underline", onClick: () => go("items") }, "view all"))), (stats.pendingDispatch.length > 0 || stats.cashRisk.length > 0) && /* @__PURE__ */ React.createElement("div", { className: "grid md:grid-cols-2 gap-4 mb-5" }, stats.pendingDispatch.length > 0 && /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800 p-4" }, /* @__PURE__ */ React.createElement("div", { className: "flex items-center justify-between mb-2" }, /* @__PURE__ */ React.createElement("h3", { className: "font-bold text-sm text-zinc-100" }, "\u{1F69A} Goods Pending Dispatch \u2014 ", stats.pendingDispatch.length), /* @__PURE__ */ React.createElement("button", { className: "text-xs font-semibold text-red-400", onClick: () => go("sales", { pill: "pending-dispatch" }) }, "View all \u2192")), stats.pendingDispatch.slice(0, 4).map((inv) => /* @__PURE__ */ React.createElement("div", { key: inv.id, className: "flex items-center justify-between py-1.5 text-sm border-b border-zinc-800 last:border-0" }, /* @__PURE__ */ React.createElement("span", { className: "text-zinc-300" }, inv.invNo, " \xB7 ", inv.partyName), /* @__PURE__ */ React.createElement("span", { className: "num font-semibold text-zinc-400" }, fmt(inv.total, cur))))), stats.cashRisk.length > 0 && /* @__PURE__ */ React.createElement("div", { className: "bg-red-950/30 rounded-xl border border-red-900/50 p-4" }, /* @__PURE__ */ React.createElement("div", { className: "flex items-center justify-between mb-2" }, /* @__PURE__ */ React.createElement("h3", { className: "font-bold text-sm text-red-400" }, "\u26A0\uFE0F Cash Sales \u2014 Payment Not Received \u2014 ", stats.cashRisk.length), /* @__PURE__ */ React.createElement("button", { className: "text-xs font-semibold text-red-400", onClick: () => go("sales") }, "View \u2192")), /* @__PURE__ */ React.createElement("p", { className: "text-[11px] text-red-400/80 mb-2" }, "Goods already dispatched on cash terms, still unpaid \u2014 harder to collect than a normal credit sale."), stats.cashRisk.slice(0, 4).map((inv) => /* @__PURE__ */ React.createElement("div", { key: inv.id, className: "flex items-center justify-between py-1.5 text-sm border-b border-red-900/40 last:border-0" }, /* @__PURE__ */ React.createElement("span", { className: "text-red-200" }, inv.invNo, " \xB7 ", inv.partyName), /* @__PURE__ */ React.createElement("span", { className: "num font-bold text-red-400" }, fmt(n2(inv.total) - (derived.paidByRef[inv.id] || 0), cur)))))), stats.followupsDue.length > 0 && /* @__PURE__ */ React.createElement("div", { className: "mb-5 bg-zinc-900 rounded-xl border border-zinc-800 p-4" }, /* @__PURE__ */ React.createElement("div", { className: "flex items-center justify-between mb-2" }, /* @__PURE__ */ React.createElement("h3", { className: "font-bold text-sm text-zinc-100" }, "\u{1F4C5} Follow-ups Due — ", stats.followupsDue.length), /* @__PURE__ */ React.createElement("button", { className: "text-xs font-semibold text-red-400", onClick: () => go("followups") }, "View all →")), stats.followupsDue.slice(0, 5).map((f) => /* @__PURE__ */ React.createElement("div", { key: f.id, className: "flex items-center justify-between py-1.5 text-sm border-b border-zinc-800 last:border-0" }, /* @__PURE__ */ React.createElement("span", { className: "text-zinc-300" }, f.partyName, " \xB7 ", f.note), /* @__PURE__ */ React.createElement("span", { className: `text-xs font-semibold ${f.dueDate < tk ? "text-red-400" : "text-amber-400"}` }, f.dueDate < tk ? "Overdue" : "Today")))), /* @__PURE__ */ React.createElement("div", { className: "grid md:grid-cols-2 gap-4" }, /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800 p-4" }, /* @__PURE__ */ React.createElement("div", { className: "flex items-center justify-between mb-3" }, /* @__PURE__ */ React.createElement("h3", { className: "font-bold text-sm text-zinc-100" }, "Recent invoices"), /* @__PURE__ */ React.createElement("button", { className: "text-xs font-semibold text-red-400", onClick: () => go("sales") }, "View all \u2192")), recentInv.length === 0 ? /* @__PURE__ */ React.createElement(Empty, { icon: "\u{1F9FE}", msg: "No invoices yet. Create your first sale!", action: /* @__PURE__ */ React.createElement(Btn, { kind: "brand", size: "sm", onClick: () => go("new-sale") }, "New Sale") }) : recentInv.map((inv) => {
     const paid = derived.paidByRef[inv.id] || 0;
     const bal = n2(inv.total) - paid;
     return /* @__PURE__ */ React.createElement("div", { key: inv.id, className: "flex items-center justify-between py-2 border-b border-zinc-800 last:border-0" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("div", { className: "text-sm font-semibold text-zinc-200" }, inv.partyName || "Cash Sale"), /* @__PURE__ */ React.createElement("div", { className: "text-[11px] text-zinc-500" }, inv.invNo, " \xB7 ", fdate(inv.date))), /* @__PURE__ */ React.createElement("div", { className: "text-right" }, /* @__PURE__ */ React.createElement("div", { className: "text-sm font-bold num" }, fmt(inv.total, cur)), /* @__PURE__ */ React.createElement("div", { className: `text-[11px] font-semibold ${bal <= 0.01 ? "text-emerald-400" : "text-amber-400"}` }, bal <= 0.01 ? "PAID" : "Due " + fmt(bal, cur))));
@@ -2202,7 +2237,8 @@ function PartyDetail({ db, derived, actions, go, S, partyId, tab: initTab }) {
   const cur = S.currency;
   const party = db.parties.find((p) => p.id === partyId);
   const [tab, setTab] = useState(initTab || "profile");
-  const TABS = [["profile", "Profile"], ["ledger", "Ledger"], ["documents", "Documents"], ["notes", "Notes"]];
+  const openFollowups = db.followups.filter((f) => f.partyId === partyId && f.status !== "Done");
+  const TABS = [["profile", "Profile"], ["ledger", "Ledger"], ["followups", `Follow-ups${openFollowups.length ? ` (${openFollowups.length})` : ""}`], ["documents", "Documents"], ["notes", "Notes"]];
   if (!party) {
     return /* @__PURE__ */ React.createElement("div", { className: "anim-in" }, /* @__PURE__ */ React.createElement(PageHead, { title: "Party not found", right: /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "sm", onClick: () => go("parties") }, "← Parties") }), /* @__PURE__ */ React.createElement(Empty, { icon: "\u{1F465}", msg: "This party no longer exists." }));
   }
@@ -2212,7 +2248,7 @@ function PartyDetail({ db, derived, actions, go, S, partyId, tab: initTab }) {
     title: party.name,
     sub: `${party.type || "Customer"}${party.phone ? " \xB7 " + party.phone : ""} \xB7 ${balSub}`,
     right: /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "sm", onClick: () => go("parties") }, "← Parties")
-  }), /* @__PURE__ */ React.createElement("div", { className: "flex gap-1 border-b-2 border-zinc-800 mb-4 overflow-x-auto" }, TABS.map(([id, lbl]) => /* @__PURE__ */ React.createElement("button", { key: id, onClick: () => setTab(id), className: `px-4 py-2 text-sm font-semibold whitespace-nowrap -mb-0.5 border-b-2 transition ${tab === id ? "border-red-500 text-red-400" : "border-transparent text-zinc-500 hover:text-zinc-300"}` }, lbl))), tab === "profile" && /* @__PURE__ */ React.createElement(PartyProfileTab, { party, db, actions }), tab === "ledger" && /* @__PURE__ */ React.createElement(PartyLedgerTab, { party, db, cur }), tab === "documents" && /* @__PURE__ */ React.createElement(PartyDocumentsTab, { party, actions }), tab === "notes" && /* @__PURE__ */ React.createElement(PartyNotesTab, { party, actions }));
+  }), /* @__PURE__ */ React.createElement("div", { className: "flex gap-1 border-b-2 border-zinc-800 mb-4 overflow-x-auto" }, TABS.map(([id, lbl]) => /* @__PURE__ */ React.createElement("button", { key: id, onClick: () => setTab(id), className: `px-4 py-2 text-sm font-semibold whitespace-nowrap -mb-0.5 border-b-2 transition ${tab === id ? "border-red-500 text-red-400" : "border-transparent text-zinc-500 hover:text-zinc-300"}` }, lbl))), tab === "profile" && /* @__PURE__ */ React.createElement(PartyProfileTab, { party, db, actions }), tab === "ledger" && /* @__PURE__ */ React.createElement(PartyLedgerTab, { party, db, cur }), tab === "followups" && /* @__PURE__ */ React.createElement(PartyFollowupsTab, { party, db, actions }), tab === "documents" && /* @__PURE__ */ React.createElement(PartyDocumentsTab, { party, actions }), tab === "notes" && /* @__PURE__ */ React.createElement(PartyNotesTab, { party, actions }));
 }
 
 function PartyProfileTab({ party, db, actions }) {
@@ -2246,6 +2282,39 @@ function PartyLedgerTab({ party, db, cur }) {
   const closing = entries.length ? entries[entries.length - 1].bal : n2(party.openingBalance);
   return /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("div", { className: "flex flex-wrap gap-2 items-center mb-3" }, /* @__PURE__ */ React.createElement(Input, { type: "date", value: from, onChange: (e) => setFrom(e.target.value), className: "!w-auto" }), /* @__PURE__ */ React.createElement("span", { className: "text-xs text-zinc-500" }, "to"), /* @__PURE__ */ React.createElement(Input, { type: "date", value: to, onChange: (e) => setTo(e.target.value), className: "!w-auto" }), /* @__PURE__ */ React.createElement("div", { className: "ml-auto font-bold text-sm" }, "Closing: ", /* @__PURE__ */ React.createElement("span", { className: `num ${closing > 0.01 ? "text-amber-400" : closing < -0.01 ? "text-red-400" : "text-zinc-400"}` }, fmt(closing, cur)))), entries.length === 0 ? /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800" }, /* @__PURE__ */ React.createElement(Empty, { icon: "\u{1F4D2}", msg: "No ledger entries in this range." })) : /* @__PURE__ */ React.createElement(Table, { head: ["Date", "Ref", "Description", { t: "Debit", right: true }, { t: "Credit", right: true }, { t: "Balance", right: true }] }, entries.map((e, i) => /* @__PURE__ */ React.createElement("tr", { key: i }, /* @__PURE__ */ React.createElement(Td, { className: "whitespace-nowrap text-zinc-400" }, fdate(e.date)), /* @__PURE__ */ React.createElement(Td, { className: "text-xs" }, e.ref), /* @__PURE__ */ React.createElement(Td, null, e.desc), /* @__PURE__ */ React.createElement(Td, { right: true }, e.dr > 0 ? fmt(e.dr, cur) : "—"), /* @__PURE__ */ React.createElement(Td, { right: true }, e.cr > 0 ? fmt(e.cr, cur) : "—"), /* @__PURE__ */ React.createElement(Td, { right: true, className: `font-bold ${e.bal > 0.01 ? "text-amber-400" : e.bal < -0.01 ? "text-red-400" : "text-zinc-300"}` }, fmt(e.bal, cur))))));
 }
+/**
+ * Follow-up CRM (Module 9): dated reminders against a party — "call back", "payment
+ * follow-up" — replacing the plain free-text notes as the place this kind of thing
+ * lives (Parties.notes stays for genuinely unstructured notes; this is for anything
+ * with a due date that should surface as a worklist item, here and on the Dashboard).
+ */
+function PartyFollowupsTab({ party, db, actions }) {
+  const [dueDate, setDueDate] = useState(today());
+  const [note, setNote] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [confirm, setConfirm] = useState(null);
+  const items = useMemo(() => [...db.followups].filter((f) => f.partyId === party.id).sort((a, b) => String(a.dueDate).localeCompare(String(b.dueDate))), [db.followups, party.id]);
+  const tk = today();
+  const add = async () => {
+    if (!note.trim()) {
+      toast("Enter a note for this follow-up", "warn");
+      return;
+    }
+    setSaving(true);
+    try {
+      await actions.saveFollowup({ id: "", partyId: party.id, partyName: party.name, dueDate, note: note.trim(), status: "Open", completedAt: "" });
+      setNote("");
+    } catch (e) {
+      toast("Save failed: " + (e.message || e), "err");
+    }
+    setSaving(false);
+  };
+  const toggleDone = (f) => actions.saveFollowup({ ...f, status: f.status === "Done" ? "Open" : "Done", completedAt: f.status === "Done" ? "" : new Date().toISOString() });
+  return /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800 p-4 mb-4 max-w-2xl" }, /* @__PURE__ */ React.createElement("h3", { className: "text-xs font-bold uppercase tracking-wide text-zinc-500 mb-3" }, "Add follow-up"), /* @__PURE__ */ React.createElement("div", { className: "flex gap-2 items-end flex-wrap" }, /* @__PURE__ */ React.createElement(Field, { label: "Due date" }, /* @__PURE__ */ React.createElement(Input, { type: "date", value: dueDate, onChange: (e) => setDueDate(e.target.value), className: "!w-auto" })), /* @__PURE__ */ React.createElement("div", { className: "flex-1" }, /* @__PURE__ */ React.createElement(Field, { label: "Note" }, /* @__PURE__ */ React.createElement(Input, { value: note, onChange: (e) => setNote(e.target.value), placeholder: "Call back about payment, confirm order…" }))), /* @__PURE__ */ React.createElement(Btn, { kind: "brand", disabled: saving, onClick: add }, saving ? "Saving…" : "+ Add"))), items.length === 0 ? /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800" }, /* @__PURE__ */ React.createElement(Empty, { icon: "\u{1F4C5}", msg: "No follow-ups for this party yet." })) : /* @__PURE__ */ React.createElement(Table, { head: ["Due", "Note", "Status", ""] }, items.map((f) => {
+    const overdue = f.status !== "Done" && f.dueDate < tk;
+    return /* @__PURE__ */ React.createElement("tr", { key: f.id }, /* @__PURE__ */ React.createElement(Td, { className: `whitespace-nowrap ${overdue ? "text-red-400 font-bold" : "text-zinc-400"}` }, fdate(f.dueDate), overdue && " ⚠"), /* @__PURE__ */ React.createElement(Td, { className: f.status === "Done" ? "text-zinc-500 line-through" : "" }, f.note), /* @__PURE__ */ React.createElement(Td, null, /* @__PURE__ */ React.createElement("span", { className: `px-2 py-0.5 rounded-full text-[10px] font-bold ${f.status === "Done" ? "bg-zinc-800 text-zinc-400" : overdue ? "bg-red-950/50 text-red-400" : "bg-amber-950/50 text-amber-400"}` }, f.status === "Done" ? "DONE" : overdue ? "OVERDUE" : "OPEN")), /* @__PURE__ */ React.createElement(Td, null, /* @__PURE__ */ React.createElement("div", { className: "flex gap-1 justify-end" }, /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "xs", onClick: () => toggleDone(f) }, f.status === "Done" ? "Reopen" : "Mark Done"), /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "xs", className: "!text-red-400", onClick: () => setConfirm(f) }, "\u{1F5D1}"))));
+  })), confirm && /* @__PURE__ */ React.createElement(Confirm, { msg: "Delete this follow-up?", onYes: () => actions.deleteFollowup(confirm.id), onClose: () => setConfirm(null) }));
+}
 
 function PartyDocumentsTab({ party, actions }) {
   const [uploading, setUploading] = useState(false);
@@ -2266,7 +2335,28 @@ function PartyDocumentsTab({ party, actions }) {
 
 function PartyNotesTab({ party, actions }) {
   const [notes, setNotes] = useState(party.notes || "");
-  return /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800 p-4 max-w-2xl" }, /* @__PURE__ */ React.createElement("h3", { className: "text-xs font-bold uppercase tracking-wide text-zinc-500 mb-3" }, "Notes"), /* @__PURE__ */ React.createElement("p", { className: "text-[11px] text-zinc-500 mb-2" }, "This becomes a full follow-up timeline in a later module — for now it's a free-text notebook for this party."), /* @__PURE__ */ React.createElement("textarea", { value: notes, onChange: (e) => setNotes(e.target.value), rows: 8, className: `${inputCls} resize-y` }), /* @__PURE__ */ React.createElement(Btn, { kind: "brand", className: "mt-3", onClick: () => actions.saveParty({ ...party, notes }) }, "Save Notes"));
+  return /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800 p-4 max-w-2xl" }, /* @__PURE__ */ React.createElement("h3", { className: "text-xs font-bold uppercase tracking-wide text-zinc-500 mb-3" }, "Notes"), /* @__PURE__ */ React.createElement("p", { className: "text-[11px] text-zinc-500 mb-2" }, "Free-text notebook for this party. For dated reminders (call back, payment follow-up…), use the Follow-ups tab instead."), /* @__PURE__ */ React.createElement("textarea", { value: notes, onChange: (e) => setNotes(e.target.value), rows: 8, className: `${inputCls} resize-y` }), /* @__PURE__ */ React.createElement(Btn, { kind: "brand", className: "mt-3", onClick: () => actions.saveParty({ ...party, notes }) }, "Save Notes"));
+}
+/**
+ * Global Follow-up worklist (Module 9) — every open reminder across every party, sorted
+ * soonest-first, so the owner has one place to work through "who do I need to call
+ * today" instead of clicking into each party individually. The per-party tab above is
+ * for adding/reviewing one party's history; this is the cross-party action list.
+ */
+function FollowupsPage({ db, actions, go }) {
+  const [showDone, setShowDone] = useState(false);
+  const tk = today();
+  const rows = useMemo(() => {
+    let list = [...db.followups];
+    if (!showDone) list = list.filter((f) => f.status !== "Done");
+    return list.sort((a, b) => String(a.dueDate).localeCompare(String(b.dueDate)));
+  }, [db.followups, showDone]);
+  const overdueCount = db.followups.filter((f) => f.status !== "Done" && f.dueDate < tk).length;
+  const toggleDone = (f) => actions.saveFollowup({ ...f, status: f.status === "Done" ? "Open" : "Done", completedAt: f.status === "Done" ? "" : new Date().toISOString() });
+  return /* @__PURE__ */ React.createElement("div", { className: "anim-in" }, /* @__PURE__ */ React.createElement(PageHead, { title: "Follow-ups", sub: `${db.followups.filter((f) => f.status !== "Done").length} open \xB7 ${overdueCount} overdue` }), /* @__PURE__ */ React.createElement("label", { className: "flex items-center gap-1.5 text-xs font-semibold text-zinc-400 cursor-pointer mb-3" }, /* @__PURE__ */ React.createElement("input", { type: "checkbox", checked: showDone, onChange: (e) => setShowDone(e.target.checked) }), " Show completed"), rows.length === 0 ? /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800" }, /* @__PURE__ */ React.createElement(Empty, { icon: "✅", msg: "No open follow-ups. Add one from a party's Follow-ups tab." })) : /* @__PURE__ */ React.createElement(Table, { head: ["Due", "Party", "Note", "Status", ""] }, rows.map((f) => {
+    const overdue = f.status !== "Done" && f.dueDate < tk;
+    return /* @__PURE__ */ React.createElement("tr", { key: f.id }, /* @__PURE__ */ React.createElement(Td, { className: `whitespace-nowrap ${overdue ? "text-red-400 font-bold" : "text-zinc-400"}` }, fdate(f.dueDate), overdue && " ⚠"), /* @__PURE__ */ React.createElement(Td, { className: "font-semibold text-red-400 cursor-pointer", onClick: () => go("party-detail", { partyId: f.partyId, tab: "followups" }) }, f.partyName), /* @__PURE__ */ React.createElement(Td, { className: f.status === "Done" ? "text-zinc-500 line-through" : "" }, f.note), /* @__PURE__ */ React.createElement(Td, null, /* @__PURE__ */ React.createElement("span", { className: `px-2 py-0.5 rounded-full text-[10px] font-bold ${f.status === "Done" ? "bg-zinc-800 text-zinc-400" : overdue ? "bg-red-950/50 text-red-400" : "bg-amber-950/50 text-amber-400"}` }, f.status === "Done" ? "DONE" : overdue ? "OVERDUE" : "OPEN")), /* @__PURE__ */ React.createElement(Td, null, /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "xs", onClick: () => toggleDone(f) }, f.status === "Done" ? "Reopen" : "Mark Done")));
+  })));
 }
 
 /**

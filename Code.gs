@@ -43,6 +43,11 @@ var SCHEMA = {
   // (Payments stays the one source of truth for "how much of this bill is settled").
   PurchaseReturns: ['id','prNo','date','partyId','partyName','subTotal','total','status','notes','createdAt','sourceType','sourceId'],
   PurchaseReturnItems: ['id','purchaseReturnId','purchaseItemId','itemId','name','qty','rate','amount'],
+  // ---- Follow-up CRM (Module 9): dated reminders against a party — "call back",
+  // "payment follow-up", etc. Deliberately its own sheet rather than overloading the
+  // free-text Parties.notes field, so overdue/due-today items can be queried and
+  // surfaced (Dashboard, a cross-party worklist) instead of living in unstructured text.
+  Followups: ['id','partyId','partyName','dueDate','note','status','createdAt','completedAt'],
   Settings: ['key','value'],
   Counters: ['key','value']
 };
@@ -289,7 +294,8 @@ function bootstrap() {
     salesReturnItems: readAll_('SalesReturnItems'),
     dispatchLog: readAll_('DispatchLog'),
     purchaseReturns: readAll_('PurchaseReturns'),
-    purchaseReturnItems: readAll_('PurchaseReturnItems')
+    purchaseReturnItems: readAll_('PurchaseReturnItems'),
+    followups: readAll_('Followups')
   });
 }
 
@@ -492,6 +498,11 @@ function apiDeleteContact(id) { return withLock_(function(){ deleteById_('PartyC
 // P&L impact, so it needs none of the transactional machinery those writes use.
 function apiSaveOpeningBalance(json) { return withLock_(function(){ return JSON.stringify({ ok: true, record: upsert_('OpeningBalances', JSON.parse(json)) }); }); }
 function apiDeleteOpeningBalance(id) { return withLock_(function(){ deleteById_('OpeningBalances', id); return JSON.stringify({ ok: true }); }); }
+
+// ---- Follow-up CRM (Module 9: dated reminders against a party) ----
+// As simple as OpeningBalances above — no stock, no counters, no money impact.
+function apiSaveFollowup(json) { return withLock_(function(){ return JSON.stringify({ ok: true, record: upsert_('Followups', JSON.parse(json)) }); }); }
+function apiDeleteFollowup(id) { return withLock_(function(){ deleteById_('Followups', id); return JSON.stringify({ ok: true }); }); }
 
 // ================= SALES SUITE (Module 4): Quotation -> Sales Order -> Invoice -> Return =================
 
