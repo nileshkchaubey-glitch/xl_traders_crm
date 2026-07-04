@@ -349,7 +349,7 @@ function StatCard({ label, value, sub, tone = "ink" }) {
 function Empty({ icon = "\u{1F4C4}", msg, action }) {
   return /* @__PURE__ */ React.createElement("div", { className: "text-center py-12 text-zinc-500" }, /* @__PURE__ */ React.createElement("div", { className: "text-4xl mb-2" }, icon), /* @__PURE__ */ React.createElement("p", { className: "text-sm mb-3" }, msg), action);
 }
-function AutoComplete({ value, onChange, onPick, options, render, placeholder, className, inputRef, onEnterEmpty, allowCreate, onCreate }) {
+function AutoComplete({ value, onChange, onPick, options, render, placeholder, className, inputRef, onEnterEmpty, allowCreate, onCreate, onArrow }) {
   const [open, setOpen] = useState(false);
   const [hi, setHi] = useState(0);
   const wrapRef = useRef(null);
@@ -369,12 +369,29 @@ function AutoComplete({ value, onChange, onPick, options, render, placeholder, c
     onPick(o);
     setOpen(false);
   };
+  // ArrowUp/Down normally browse the suggestion list. But inside a keyboard-first
+  // billing grid, Up/Down should instead jump to the same field in the prev/next
+  // row (see useGridNav) — so when this field has no live query to browse
+  // (nothing typed, or nothing matches) and a grid gave us `onArrow`, hand the
+  // key off to the grid instead of moving the highlight. Components that don't
+  // pass `onArrow` (plain pickers like the Party Ledger search) keep the
+  // original arrow-browses-suggestions behavior untouched.
   const keydown = (e) => {
     if (e.key === "ArrowDown") {
+      if (onArrow && !(value.trim() && filtered.length)) {
+        e.preventDefault();
+        onArrow("down");
+        return;
+      }
       e.preventDefault();
       setOpen(true);
       setHi((h) => Math.min(h + 1, filtered.length - 1));
     } else if (e.key === "ArrowUp") {
+      if (onArrow && !(value.trim() && filtered.length)) {
+        e.preventDefault();
+        onArrow("up");
+        return;
+      }
       e.preventDefault();
       setHi((h) => Math.max(h - 1, 0));
     } else if (e.key === "Enter") {
@@ -436,6 +453,132 @@ function Table({ head, children, foot }) {
   return /* @__PURE__ */ React.createElement("div", { className: "overflow-x-auto rounded-xl border border-zinc-800 bg-zinc-900" }, /* @__PURE__ */ React.createElement("table", { className: "w-full text-sm min-w-[560px]" }, /* @__PURE__ */ React.createElement("thead", null, /* @__PURE__ */ React.createElement("tr", { className: "bg-zinc-800/60 text-left" }, head.map((h, i) => /* @__PURE__ */ React.createElement("th", { key: i, className: `px-3 py-2.5 text-[11px] font-bold uppercase tracking-wide text-zinc-400 whitespace-nowrap ${h.right ? "text-right" : ""}` }, h.t !== void 0 ? h.t : h)))), /* @__PURE__ */ React.createElement("tbody", { className: "divide-y divide-zinc-800" }, children), foot && /* @__PURE__ */ React.createElement("tfoot", { className: "bg-zinc-800/60 font-bold border-t-2 border-zinc-700" }, foot)));
 }
 const Td = ({ right, className = "", children, ...p }) => /* @__PURE__ */ React.createElement("td", { ...p, className: `px-3 py-2.5 ${right ? "text-right num" : ""} ${className}` }, children);
+
+/**
+ * Shared keyboard-nav hook for spreadsheet-style entry grids (New Sale, New
+ * Purchase, and any future grid). Centralizing this once means every grid
+ * gets the same feel — Tab/Shift+Tab move fields natively, Enter moves to the
+ * next field (or commits + starts a new row on the last field), and Arrow
+ * Up/Down jump to the same field on the prev/next row — instead of every
+ * screen re-implementing (and slowly drifting from) its own version.
+ */
+function useGridNav(flow) {
+  const refs = useRef({});
+  const setCellRef = (key, field) => (el) => { refs.current[`${key}:${field}`] = el; };
+  const focusCell = (key, field) => setTimeout(() => {
+    const el = refs.current[`${key}:${field}`];
+    if (el) { el.focus(); el.select && el.select(); }
+  }, 30);
+  // Wire this to a plain <input>'s onKeyDown. `rows` is the current line array
+  // (each item needs a `.key`), `addRow` appends a new blank row and returns its key.
+  const onCellKey = (e, key, field, rows, addRow) => {
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      const idx = rows.findIndex((r) => r.key === key);
+      const nextIdx = e.key === "ArrowDown" ? idx + 1 : idx - 1;
+      if (nextIdx >= 0 && nextIdx < rows.length) focusCell(rows[nextIdx].key, field);
+      return;
+    }
+    if (e.key !== "Enter") return;
+    e.preventDefault();
+    const i = flow.indexOf(field);
+    if (i < flow.length - 1) { focusCell(key, flow[i + 1]); return; }
+    const idx = rows.findIndex((r) => r.key === key);
+    if (idx === rows.length - 1) {
+      const nk = addRow();
+      focusCell(nk, flow[0]);
+    } else focusCell(rows[idx + 1].key, flow[0]);
+  };
+  // AutoComplete cells intercept arrow keys themselves (to browse suggestions),
+  // so they hand control back to us via this instead of onCellKey — see the
+  // `onArrow` prop on AutoComplete.
+  const onArrow = (key, field, rows) => (dir) => {
+    const idx = rows.findIndex((r) => r.key === key);
+    const nextIdx = dir === "down" ? idx + 1 : idx - 1;
+    if (nextIdx >= 0 && nextIdx < rows.length) focusCell(rows[nextIdx].key, field);
+  };
+  return { setCellRef, focusCell, onCellKey, onArrow };
+}
+
+/**
+ * After every save, ask "Save & New or Done?" instead of silently bouncing to
+ * a list screen. A cashier who just billed one customer usually has another
+ * one waiting — Save & New (Enter) resets the form and refocuses the first
+ * field with zero mouse movement; Done is for when the queue is empty.
+ */
+function SaveConfirmModal({ label, amount, cur, onSaveNew, onDone }) {
+  const btnRef = useRef(null);
+  useEffect(() => { btnRef.current && btnRef.current.focus(); }, []);
+  return /* @__PURE__ */ React.createElement(Modal, { title: "Saved", onClose: onDone }, /* @__PURE__ */ React.createElement("p", { className: "text-sm text-zinc-300 mb-5" }, label, " saved ✓", amount != null && /* @__PURE__ */ React.createElement(React.Fragment, null, " — ", /* @__PURE__ */ React.createElement("b", { className: "num text-zinc-100" }, fmt(amount, cur)))), /* @__PURE__ */ React.createElement("div", { className: "flex gap-2 justify-end" }, /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", onClick: onDone }, "Done"), /* @__PURE__ */ React.createElement(
+    "button",
+    {
+      ref: btnRef,
+      onClick: onSaveNew,
+      className: "inline-flex items-center justify-center gap-1.5 rounded-lg font-semibold transition-colors px-4 py-2 text-sm bg-red-600 text-white hover:bg-red-500"
+    },
+    "Save & New ",
+    /* @__PURE__ */ React.createElement("span", { className: "opacity-60 text-[10px]" }, "Enter")
+  )));
+}
+
+const SHORTCUTS = [
+  ["Tab / Shift+Tab", "Next / previous field"],
+  ["Enter", "Next field — on a grid's last field, commits the row and starts a new one"],
+  ["↑ / ↓", "Same field, previous / next row (inside a grid)"],
+  ["Ctrl+S", "Save"],
+  ["Ctrl+N", "New sale"],
+  ["Ctrl+K", "Open command palette (search pages, parties, items, invoices)"],
+  ["Esc", "Close the open modal"],
+  ["?", "Show this shortcut sheet"]
+];
+function ShortcutSheet({ onClose }) {
+  return /* @__PURE__ */ React.createElement(Modal, { title: "Keyboard shortcuts", onClose }, /* @__PURE__ */ React.createElement("div", null, SHORTCUTS.map(([k, d], i) => /* @__PURE__ */ React.createElement("div", { key: i, className: "flex items-center justify-between gap-4 text-sm py-2 border-b border-zinc-800 last:border-0" }, /* @__PURE__ */ React.createElement("span", { className: "text-zinc-300" }, d), /* @__PURE__ */ React.createElement("kbd", { className: "px-2 py-1 rounded-md bg-zinc-800 border border-zinc-700 text-zinc-100 text-xs font-mono whitespace-nowrap" }, k)))));
+}
+
+/** Ctrl+K global search across pages, parties, items and recent invoices. */
+function CommandPalette({ db, go, onClose }) {
+  const [q, setQ] = useState("");
+  const [hi, setHi] = useState(0);
+  const inputRef = useRef(null);
+  useEffect(() => { inputRef.current && inputRef.current.focus(); }, []);
+  useEffect(() => {
+    const h = (e) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, [onClose]);
+  const results = useMemo(() => {
+    const s = clamp(q);
+    const out = [];
+    NAV.flatMap((sec) => sec.items).forEach((it) => {
+      if (!s || clamp(it.label).includes(s)) out.push({ type: "Page", icon: it.icon, label: it.label, action: () => go(it.id) });
+    });
+    if (s) {
+      db.parties.filter((p) => clamp(p.name).includes(s)).slice(0, 5).forEach((p) => out.push({ type: "Party", icon: "\u{1F465}", label: p.name, action: () => go("reports", { tab: "ledger", partyId: p.id }) }));
+      db.items.filter((i) => clamp(i.name).includes(s)).slice(0, 5).forEach((i) => out.push({ type: "Item", icon: "\u{1F3F7}️", label: i.name, action: () => go("items") }));
+      db.invoices.filter((inv) => clamp(inv.invNo).includes(s) || clamp(inv.partyName).includes(s)).slice(0, 5).forEach((inv) => out.push({ type: "Invoice", icon: "\u{1F9FE}", label: `${inv.invNo} — ${inv.partyName}`, action: () => go("sales") }));
+    }
+    return out.slice(0, 20);
+  }, [q, db, go]);
+  useEffect(() => setHi(0), [q]);
+  const activate = (r) => { if (r) { r.action(); onClose(); } };
+  const keydown = (e) => {
+    if (e.key === "ArrowDown") { e.preventDefault(); setHi((h) => Math.min(h + 1, results.length - 1)); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); setHi((h) => Math.max(h - 1, 0)); }
+    else if (e.key === "Enter") { e.preventDefault(); activate(results[hi]); }
+  };
+  return /* @__PURE__ */ React.createElement("div", { className: "fixed inset-0 z-[600] bg-black/70 flex items-start justify-center pt-24 px-4", onMouseDown: (e) => { if (e.target === e.currentTarget) onClose(); } }, /* @__PURE__ */ React.createElement("div", { className: "anim-in bg-zinc-900 border border-zinc-700 w-full max-w-lg rounded-2xl shadow-2xl overflow-hidden" }, /* @__PURE__ */ React.createElement("input", { ref: inputRef, value: q, onChange: (e) => setQ(e.target.value), onKeyDown: keydown, placeholder: "Search pages, parties, items, invoices…", className: "w-full px-4 py-3 bg-zinc-900 text-zinc-100 placeholder:text-zinc-500 border-b border-zinc-800 focus:outline-none" }), /* @__PURE__ */ React.createElement("div", { className: "max-h-80 overflow-y-auto" }, results.length === 0 ? /* @__PURE__ */ React.createElement("div", { className: "px-4 py-6 text-sm text-zinc-500 text-center" }, "No matches") : results.map((r, i) => /* @__PURE__ */ React.createElement(
+    "div",
+    {
+      key: i,
+      className: `flex items-center gap-3 px-4 py-2.5 cursor-pointer text-sm ${i === hi ? "bg-zinc-800" : "hover:bg-zinc-800/60"}`,
+      onMouseEnter: () => setHi(i),
+      onMouseDown: (e) => { e.preventDefault(); activate(r); }
+    },
+    /* @__PURE__ */ React.createElement("span", { className: "text-base" }, r.icon),
+    /* @__PURE__ */ React.createElement("span", { className: "flex-1 text-zinc-100" }, r.label),
+    /* @__PURE__ */ React.createElement("span", { className: "text-[10px] font-bold uppercase tracking-wide text-zinc-500" }, r.type)
+  ))), /* @__PURE__ */ React.createElement("div", { className: "px-4 py-2 border-t border-zinc-800 text-[11px] text-zinc-500 flex justify-between" }, /* @__PURE__ */ React.createElement("span", null, "↑↓ navigate • Enter select"), /* @__PURE__ */ React.createElement("span", null, "Esc close"))));
+}
 const NAV = [
   { sec: "MAIN", items: [
     { id: "dashboard", icon: "\u25A6", label: "Dashboard" },
@@ -461,10 +604,34 @@ function App() {
   const [pageProps, setPageProps] = useState({});
   const [menuOpen, setMenuOpen] = useState(false);
   const [error, setError] = useState(null);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const load = () => {
     gs("bootstrap").then((data) => setDb(data)).catch((e) => setError(String(e && e.message || e)));
   };
   useEffect(load, []);
+  // Global shortcuts, available from anywhere in the app (not just billing grids):
+  // Ctrl/Cmd+K opens the command palette, "?" opens the shortcut cheat-sheet,
+  // Ctrl/Cmd+N jumps straight to New Sale — the most common "start a new entry" action.
+  useEffect(() => {
+    const h = (e) => {
+      const tag = (e.target && e.target.tagName) || "";
+      const typing = tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || e.target.isContentEditable;
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setPaletteOpen(true);
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "n") {
+        e.preventDefault();
+        setPage("new-sale");
+        setPageProps({});
+      } else if (e.key === "?" && !typing) {
+        e.preventDefault();
+        setShortcutsOpen(true);
+      }
+    };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, []);
   const derived = useMemo(() => {
     if (!db) return null;
     const itemMap = {}, partyMap = {};
@@ -676,7 +843,7 @@ function App() {
   )))))), menuOpen && /* @__PURE__ */ React.createElement("div", { className: "fixed inset-0 bg-black/60 z-[290] md:hidden", onClick: () => setMenuOpen(false) }), /* @__PURE__ */ React.createElement("main", { className: "md:ml-60 pb-20 md:pb-8" }, /* @__PURE__ */ React.createElement("div", { className: "md:hidden sticky top-0 z-[200] bg-zinc-900 border-b border-zinc-800 px-4 py-3 flex items-center justify-between" }, /* @__PURE__ */ React.createElement("button", { onClick: () => setMenuOpen(true), className: "text-xl text-zinc-100" }, "\u2630"), /* @__PURE__ */ React.createElement("div", { className: "font-extrabold text-zinc-100" }, db.settings.bizName), /* @__PURE__ */ React.createElement("button", { onClick: () => go("new-sale"), className: "w-8 h-8 rounded-lg bg-red-600 text-white font-bold" }, "+")), /* @__PURE__ */ React.createElement("div", { className: "p-4 md:p-6 max-w-6xl mx-auto" }, pages[page])), /* @__PURE__ */ React.createElement("nav", { className: "md:hidden fixed bottom-0 inset-x-0 bg-zinc-900 border-t border-zinc-800 z-[250] grid grid-cols-5" }, MOBILE_NAV.map((id) => {
     const it = NAV.flatMap((s) => s.items).find((x) => x.id === id);
     return /* @__PURE__ */ React.createElement("button", { key: id, onClick: () => go(id), className: `py-2 flex flex-col items-center gap-0.5 text-[10px] font-semibold ${page === id ? "text-red-400" : "text-zinc-500"}` }, /* @__PURE__ */ React.createElement("span", { className: "text-base" }, it.icon), it.label.split(" ")[0]);
-  })), /* @__PURE__ */ React.createElement(ToastHost, null));
+  })), /* @__PURE__ */ React.createElement(ToastHost, null), paletteOpen && /* @__PURE__ */ React.createElement(CommandPalette, { db, go, onClose: () => setPaletteOpen(false) }), shortcutsOpen && /* @__PURE__ */ React.createElement(ShortcutSheet, { onClose: () => setShortcutsOpen(false) }));
 }
 function PageHead({ title, sub, right }) {
   return /* @__PURE__ */ React.createElement("div", { className: "flex flex-wrap items-center justify-between gap-3 mb-4" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("h1", { className: "text-lg md:text-xl font-extrabold text-zinc-100" }, title), sub && /* @__PURE__ */ React.createElement("p", { className: "text-xs text-zinc-500 mt-0.5" }, sub)), /* @__PURE__ */ React.createElement("div", { className: "flex gap-2 flex-wrap" }, right));
@@ -732,7 +899,9 @@ function NewSale({ db, derived, actions, go, S, editId }) {
   const [payMode, setPayMode] = useState(S.payModes[0] || "Cash");
   const [notes, setNotes] = useState(editing ? editing.notes || "" : "");
   const [saving, setSaving] = useState(false);
-  const rowRefs = useRef({});
+  const [savedInfo, setSavedInfo] = useState(null);
+  const flow = ["name", "brand", "packing", "packs", "qty", "rate"];
+  const { setCellRef, focusCell, onCellKey, onArrow } = useGridNav(flow);
   const lastRates = useMemo(() => {
     if (!partyId) return {};
     const invs = db.invoices.filter((i) => i.partyId === partyId).sort((a, b) => String(b.date).localeCompare(String(a.date)));
@@ -800,31 +969,9 @@ function NewSale({ db, derived, actions, go, S, editId }) {
     setPartyName(rec.name);
     focusFirstItem();
   };
-  const focusCell = (key, field) => setTimeout(() => {
-    const el = rowRefs.current[`${key}:${field}`];
-    if (el) {
-      el.focus();
-      el.select && el.select();
-    }
-  }, 30);
   const focusFirstItem = () => {
     const first = lines[0];
     if (first) focusCell(first.key, "name");
-  };
-  const flow = ["name", "brand", "packing", "packs", "qty", "rate"];
-  const onCellKey = (e, key, field) => {
-    if (e.key !== "Enter") return;
-    e.preventDefault();
-    const i = flow.indexOf(field);
-    if (i < flow.length - 1) {
-      focusCell(key, flow[i + 1]);
-      return;
-    }
-    const idx = lines.findIndex((l) => l.key === key);
-    if (idx === lines.length - 1) {
-      const nk = addLine();
-      focusCell(nk, "name");
-    } else focusCell(lines[idx + 1].key, "name");
   };
   const setPacking = (key, v) => {
     const l = lines.find((x) => x.key === key);
@@ -868,13 +1015,30 @@ function NewSale({ db, derived, actions, go, S, editId }) {
         _oldLines: editing ? editLines : []
       };
       const res = await actions.saveInvoice(payload);
-      toast(`Invoice ${res.invoice.invNo} saved \u2713`);
       if (andPrint) printInvoice(res.invoice, res.items, S, derived.partyMap[partyId]);
-      go("sales");
+      if (editing) {
+        toast(`Invoice ${res.invoice.invNo} saved \u2713`);
+        go("sales");
+      } else {
+        setSavedInfo({ invNo: res.invoice.invNo, total: res.invoice.total });
+      }
     } catch (e) {
       toast("Save failed: " + (e.message || e), "err");
     }
     setSaving(false);
+  };
+  const saveAndNew = () => {
+    setSavedInfo(null);
+    const newLines = [emptyLine(), emptyLine(), emptyLine()];
+    setDate(today());
+    setPartyName("");
+    setPartyId("");
+    setLines(newLines);
+    setDiscount(0);
+    setTaxOn(!!S.taxEnabled);
+    setReceived("");
+    setNotes("");
+    focusCell(newLines[0].key, "name");
   };
   useEffect(() => {
     const h = (e) => {
@@ -920,16 +1084,17 @@ function NewSale({ db, derived, actions, go, S, editId }) {
         allowCreate: true,
         onCreate: (name) => quickCreateItem(l.key, name),
         className: cellCls + " !text-left",
-        inputRef: (el) => rowRefs.current[`${l.key}:name`] = el,
-        onEnterEmpty: (e) => onCellKey(e, l.key, "name"),
+        inputRef: setCellRef(l.key, "name"),
+        onEnterEmpty: (e) => onCellKey(e, l.key, "name", lines, addLine),
+        onArrow: onArrow(l.key, "name", lines),
         placeholder: "Type item name\u2026",
         render: (o) => /* @__PURE__ */ React.createElement("div", { className: "flex justify-between gap-2" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("span", { className: "font-medium" }, o.label), o.sub && /* @__PURE__ */ React.createElement("span", { className: "text-[11px] text-zinc-500 ml-1.5" }, o.sub)), /* @__PURE__ */ React.createElement("div", { className: "text-[11px] text-zinc-500 num self-center" }, "stk ", fq(o.item.stock)))
       }
-    ), /* @__PURE__ */ React.createElement("input", { ref: (el) => rowRefs.current[`${l.key}:brand`] = el, value: l.brand, onChange: (e) => update(l.key, { brand: e.target.value }), onKeyDown: (e) => onCellKey(e, l.key, "brand"), className: cellCls + " !text-left", placeholder: "Brand" }), /* @__PURE__ */ React.createElement("input", { ref: (el) => rowRefs.current[`${l.key}:packing`] = el, value: l.packing, onChange: (e) => setPacking(l.key, e.target.value), onKeyDown: (e) => onCellKey(e, l.key, "packing"), className: cellCls + " text-center", placeholder: "Pack", inputMode: "decimal" }), /* @__PURE__ */ React.createElement("input", { ref: (el) => rowRefs.current[`${l.key}:packs`] = el, value: l.packs, onChange: (e) => setPacks(l.key, e.target.value), onKeyDown: (e) => onCellKey(e, l.key, "packs"), className: cellCls + " text-center", placeholder: "0", inputMode: "decimal" }), /* @__PURE__ */ React.createElement("input", { ref: (el) => rowRefs.current[`${l.key}:qty`] = el, value: l.qty, onChange: (e) => update(l.key, { qty: e.target.value }), onKeyDown: (e) => onCellKey(e, l.key, "qty"), className: cellCls + " text-center font-semibold", placeholder: "0", inputMode: "decimal" }), /* @__PURE__ */ React.createElement("input", { ref: (el) => rowRefs.current[`${l.key}:rate`] = el, value: l.rate, onChange: (e) => update(l.key, { rate: e.target.value }), onKeyDown: (e) => onCellKey(e, l.key, "rate"), className: cellCls + " text-right", placeholder: "0.00", inputMode: "decimal" }), /* @__PURE__ */ React.createElement("div", { className: "text-right text-[13px] font-bold num pr-1" }, lineAmt(l) > 0 ? fq(lineAmt(l)) : "\u2014"), /* @__PURE__ */ React.createElement("button", { tabIndex: -1, onClick: () => removeLine(l.key), className: "w-7 h-7 rounded-md text-red-400 hover:bg-red-950/40 text-sm" }, "\u2715")), (lr || margin !== null || item && n2(item.stock) < n2(l.qty)) && /* @__PURE__ */ React.createElement("div", { className: "ml-[42px] mt-0.5 flex gap-3 text-[10.5px]" }, lr && /* @__PURE__ */ React.createElement("span", { className: "text-blue-400" }, "Last rate to this party: ", /* @__PURE__ */ React.createElement("b", { className: "num" }, fmt(lr.rate, cur)), " (", fdate(lr.date), ")"), margin !== null && /* @__PURE__ */ React.createElement("span", { className: margin < 0 ? "text-red-400 font-semibold" : "text-emerald-400" }, "Margin: ", /* @__PURE__ */ React.createElement("b", { className: "num" }, margin.toFixed(1), "%")), item && n2(l.qty) > n2(item.stock) && /* @__PURE__ */ React.createElement("span", { className: "text-amber-400 font-semibold" }, "\u26A0 Only ", fq(item.stock), " in stock")));
+    ), /* @__PURE__ */ React.createElement("input", { ref: setCellRef(l.key, "brand"), value: l.brand, onChange: (e) => update(l.key, { brand: e.target.value }), onKeyDown: (e) => onCellKey(e, l.key, "brand", lines, addLine), className: cellCls + " !text-left", placeholder: "Brand" }), /* @__PURE__ */ React.createElement("input", { ref: setCellRef(l.key, "packing"), value: l.packing, onChange: (e) => setPacking(l.key, e.target.value), onKeyDown: (e) => onCellKey(e, l.key, "packing", lines, addLine), className: cellCls + " text-center", placeholder: "Pack", inputMode: "decimal" }), /* @__PURE__ */ React.createElement("input", { ref: setCellRef(l.key, "packs"), value: l.packs, onChange: (e) => setPacks(l.key, e.target.value), onKeyDown: (e) => onCellKey(e, l.key, "packs", lines, addLine), className: cellCls + " text-center", placeholder: "0", inputMode: "decimal" }), /* @__PURE__ */ React.createElement("input", { ref: setCellRef(l.key, "qty"), value: l.qty, onChange: (e) => update(l.key, { qty: e.target.value }), onKeyDown: (e) => onCellKey(e, l.key, "qty", lines, addLine), className: cellCls + " text-center font-semibold", placeholder: "0", inputMode: "decimal" }), /* @__PURE__ */ React.createElement("input", { ref: setCellRef(l.key, "rate"), value: l.rate, onChange: (e) => update(l.key, { rate: e.target.value }), onKeyDown: (e) => onCellKey(e, l.key, "rate", lines, addLine), className: cellCls + " text-right", placeholder: "0.00", inputMode: "decimal" }), /* @__PURE__ */ React.createElement("div", { className: "text-right text-[13px] font-bold num pr-1" }, lineAmt(l) > 0 ? fq(lineAmt(l)) : "\u2014"), /* @__PURE__ */ React.createElement("button", { tabIndex: -1, onClick: () => removeLine(l.key), className: "w-7 h-7 rounded-md text-red-400 hover:bg-red-950/40 text-sm" }, "\u2715")), (lr || margin !== null || item && n2(item.stock) < n2(l.qty)) && /* @__PURE__ */ React.createElement("div", { className: "ml-[42px] mt-0.5 flex gap-3 text-[10.5px]" }, lr && /* @__PURE__ */ React.createElement("span", { className: "text-blue-400" }, "Last rate to this party: ", /* @__PURE__ */ React.createElement("b", { className: "num" }, fmt(lr.rate, cur)), " (", fdate(lr.date), ")"), margin !== null && /* @__PURE__ */ React.createElement("span", { className: margin < 0 ? "text-red-400 font-semibold" : "text-emerald-400" }, "Margin: ", /* @__PURE__ */ React.createElement("b", { className: "num" }, margin.toFixed(1), "%")), item && n2(l.qty) > n2(item.stock) && /* @__PURE__ */ React.createElement("span", { className: "text-amber-400 font-semibold" }, "\u26A0 Only ", fq(item.stock), " in stock")));
   }), /* @__PURE__ */ React.createElement(Btn, { kind: "soft", size: "sm", className: "mt-2", onClick: () => {
     const k = addLine();
     focusCell(k, "name");
-  } }, "+ Add row"))), /* @__PURE__ */ React.createElement("div", { className: "grid md:grid-cols-2 gap-3" }, /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800 p-4" }, /* @__PURE__ */ React.createElement("h3", { className: "text-xs font-bold uppercase tracking-wide text-zinc-500 mb-3" }, "Payment"), /* @__PURE__ */ React.createElement("div", { className: "grid grid-cols-2 gap-3" }, /* @__PURE__ */ React.createElement(Field, { label: `Received now (${cur})` }, /* @__PURE__ */ React.createElement(Input, { value: received, onChange: (e) => setReceived(e.target.value), inputMode: "decimal", placeholder: "0", disabled: !!editing })), /* @__PURE__ */ React.createElement(Field, { label: "Mode" }, /* @__PURE__ */ React.createElement(Select, { value: payMode, onChange: (e) => setPayMode(e.target.value) }, S.payModes.map((m) => /* @__PURE__ */ React.createElement("option", { key: m }, m))))), /* @__PURE__ */ React.createElement("div", { className: "flex gap-2 mt-2" }, /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "xs", onClick: () => setReceived(String(total)) }, "Full ", fmt(total, cur)), /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "xs", onClick: () => setReceived("") }, "Credit (\u20B90)")), editing && /* @__PURE__ */ React.createElement("p", { className: "text-[11px] text-zinc-500 mt-2" }, "To add payments on an existing invoice, use the Payments page.")), /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800 p-4" }, /* @__PURE__ */ React.createElement("div", { className: "flex justify-between text-sm py-1 text-zinc-400" }, /* @__PURE__ */ React.createElement("span", null, "Sub total"), /* @__PURE__ */ React.createElement("b", { className: "num" }, fmt(subTotal, cur))), /* @__PURE__ */ React.createElement("div", { className: "flex justify-between items-center text-sm py-1 text-zinc-400" }, /* @__PURE__ */ React.createElement("span", null, "Discount"), /* @__PURE__ */ React.createElement("input", { value: discount, onChange: (e) => setDiscount(e.target.value), className: "w-24 px-2 py-1 text-right text-sm bg-zinc-800 border border-zinc-700 text-zinc-100 rounded-md focus:border-red-500 focus:ring-2 focus:ring-red-500/30 num", inputMode: "decimal" })), /* @__PURE__ */ React.createElement("div", { className: "flex justify-between items-center text-sm py-1 text-zinc-400" }, /* @__PURE__ */ React.createElement("label", { className: "flex items-center gap-1.5 cursor-pointer" }, /* @__PURE__ */ React.createElement("input", { type: "checkbox", checked: taxOn, onChange: (e) => setTaxOn(e.target.checked) }), " ", S.taxLabel, " ", S.taxPct, "%"), /* @__PURE__ */ React.createElement("b", { className: "num" }, fmt(taxAmt, cur))), /* @__PURE__ */ React.createElement("div", { className: "flex justify-between text-base py-2 mt-1 border-t border-zinc-800 font-extrabold text-zinc-100" }, /* @__PURE__ */ React.createElement("span", null, "TOTAL"), /* @__PURE__ */ React.createElement("span", { className: "num" }, fmt(total, cur))), totalCost > 0 && /* @__PURE__ */ React.createElement("div", { className: "flex justify-between text-[11px] text-zinc-500" }, /* @__PURE__ */ React.createElement("span", null, "Est. profit (before tax)"), /* @__PURE__ */ React.createElement("b", { className: `num ${profit < 0 ? "text-red-400" : "text-emerald-400"}` }, fmt(profit, cur))), n2(received) > 0 && n2(received) < total && /* @__PURE__ */ React.createElement("div", { className: "flex justify-between text-xs mt-1 text-amber-400 font-semibold" }, /* @__PURE__ */ React.createElement("span", null, "Balance due"), /* @__PURE__ */ React.createElement("span", { className: "num" }, fmt(total - n2(received), cur))), /* @__PURE__ */ React.createElement("div", { className: "grid grid-cols-2 gap-2 mt-4" }, /* @__PURE__ */ React.createElement(Btn, { kind: "brand", disabled: saving, onClick: () => save(false) }, saving ? "Saving\u2026" : editing ? "Update" : "Save", " ", /* @__PURE__ */ React.createElement("span", { className: "opacity-60 text-[10px] hidden md:inline" }, "Ctrl+S")), /* @__PURE__ */ React.createElement(Btn, { disabled: saving, onClick: () => save(true) }, "Save & Print")))));
+  } }, "+ Add row"))), /* @__PURE__ */ React.createElement("div", { className: "grid md:grid-cols-2 gap-3" }, /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800 p-4" }, /* @__PURE__ */ React.createElement("h3", { className: "text-xs font-bold uppercase tracking-wide text-zinc-500 mb-3" }, "Payment"), /* @__PURE__ */ React.createElement("div", { className: "grid grid-cols-2 gap-3" }, /* @__PURE__ */ React.createElement(Field, { label: `Received now (${cur})` }, /* @__PURE__ */ React.createElement(Input, { value: received, onChange: (e) => setReceived(e.target.value), inputMode: "decimal", placeholder: "0", disabled: !!editing })), /* @__PURE__ */ React.createElement(Field, { label: "Mode" }, /* @__PURE__ */ React.createElement(Select, { value: payMode, onChange: (e) => setPayMode(e.target.value) }, S.payModes.map((m) => /* @__PURE__ */ React.createElement("option", { key: m }, m))))), /* @__PURE__ */ React.createElement("div", { className: "flex gap-2 mt-2" }, /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "xs", onClick: () => setReceived(String(total)) }, "Full ", fmt(total, cur)), /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "xs", onClick: () => setReceived("") }, "Credit (\u20B90)")), editing && /* @__PURE__ */ React.createElement("p", { className: "text-[11px] text-zinc-500 mt-2" }, "To add payments on an existing invoice, use the Payments page.")), /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800 p-4" }, /* @__PURE__ */ React.createElement("div", { className: "flex justify-between text-sm py-1 text-zinc-400" }, /* @__PURE__ */ React.createElement("span", null, "Sub total"), /* @__PURE__ */ React.createElement("b", { className: "num" }, fmt(subTotal, cur))), /* @__PURE__ */ React.createElement("div", { className: "flex justify-between items-center text-sm py-1 text-zinc-400" }, /* @__PURE__ */ React.createElement("span", null, "Discount"), /* @__PURE__ */ React.createElement("input", { value: discount, onChange: (e) => setDiscount(e.target.value), className: "w-24 px-2 py-1 text-right text-sm bg-zinc-800 border border-zinc-700 text-zinc-100 rounded-md focus:border-red-500 focus:ring-2 focus:ring-red-500/30 num", inputMode: "decimal" })), /* @__PURE__ */ React.createElement("div", { className: "flex justify-between items-center text-sm py-1 text-zinc-400" }, /* @__PURE__ */ React.createElement("label", { className: "flex items-center gap-1.5 cursor-pointer" }, /* @__PURE__ */ React.createElement("input", { type: "checkbox", checked: taxOn, onChange: (e) => setTaxOn(e.target.checked) }), " ", S.taxLabel, " ", S.taxPct, "%"), /* @__PURE__ */ React.createElement("b", { className: "num" }, fmt(taxAmt, cur))), /* @__PURE__ */ React.createElement("div", { className: "flex justify-between text-base py-2 mt-1 border-t border-zinc-800 font-extrabold text-zinc-100" }, /* @__PURE__ */ React.createElement("span", null, "TOTAL"), /* @__PURE__ */ React.createElement("span", { className: "num" }, fmt(total, cur))), totalCost > 0 && /* @__PURE__ */ React.createElement("div", { className: "flex justify-between text-[11px] text-zinc-500" }, /* @__PURE__ */ React.createElement("span", null, "Est. profit (before tax)"), /* @__PURE__ */ React.createElement("b", { className: `num ${profit < 0 ? "text-red-400" : "text-emerald-400"}` }, fmt(profit, cur))), n2(received) > 0 && n2(received) < total && /* @__PURE__ */ React.createElement("div", { className: "flex justify-between text-xs mt-1 text-amber-400 font-semibold" }, /* @__PURE__ */ React.createElement("span", null, "Balance due"), /* @__PURE__ */ React.createElement("span", { className: "num" }, fmt(total - n2(received), cur))), /* @__PURE__ */ React.createElement("div", { className: "grid grid-cols-2 gap-2 mt-4" }, /* @__PURE__ */ React.createElement(Btn, { kind: "brand", disabled: saving, onClick: () => save(false) }, saving ? "Saving\u2026" : editing ? "Update" : "Save", " ", /* @__PURE__ */ React.createElement("span", { className: "opacity-60 text-[10px] hidden md:inline" }, "Ctrl+S")), /* @__PURE__ */ React.createElement(Btn, { disabled: saving, onClick: () => save(true) }, "Save & Print")))), savedInfo && /* @__PURE__ */ React.createElement(SaveConfirmModal, { label: `Invoice ${savedInfo.invNo}`, amount: savedInfo.total, cur, onSaveNew: saveAndNew, onDone: () => { setSavedInfo(null); go("sales"); } }));
 }
 function SalesList({ db, derived, actions, go, S }) {
   const cur = S.currency;
@@ -991,7 +1156,9 @@ function NewPurchase({ db, derived, actions, go, S, editId }) {
   const [payMode, setPayMode] = useState(S.payModes[0] || "Cash");
   const [notes, setNotes] = useState(editing ? editing.notes || "" : "");
   const [saving, setSaving] = useState(false);
-  const refs = useRef({});
+  const [savedInfo, setSavedInfo] = useState(null);
+  const flow = ["name", "qty", "rate"];
+  const { setCellRef, focusCell, onCellKey: onKey, onArrow } = useGridNav(flow);
   const itemOptions = useMemo(() => db.items.map((i) => ({ id: i.id, label: i.name, sub: i.brand, item: i })), [db.items]);
   const supplierOptions = useMemo(() => db.parties.filter((p) => p.type !== "Customer").map((p) => ({ id: p.id, label: p.name, sub: p.phone })), [db.parties]);
   const update = (key, patch) => setLines((ls) => ls.map((l) => l.key === key ? { ...l, ...patch } : l));
@@ -1001,31 +1168,9 @@ function NewPurchase({ db, derived, actions, go, S, editId }) {
     setLines((ls) => [...ls, nl]);
     return nl.key;
   };
-  const focusCell = (key, f) => setTimeout(() => {
-    const el = refs.current[`${key}:${f}`];
-    if (el) {
-      el.focus();
-      el.select && el.select();
-    }
-  }, 30);
   const filled = lines.filter((l) => l.name.trim() && n2(l.qty) > 0);
   const subTotal = filled.reduce((s, l) => s + n2(l.qty) * n2(l.rate), 0);
   const total = subTotal + n2(other);
-  const flow = ["name", "qty", "rate"];
-  const onKey = (e, key, field) => {
-    if (e.key !== "Enter") return;
-    e.preventDefault();
-    const i = flow.indexOf(field);
-    if (i < flow.length - 1) {
-      focusCell(key, flow[i + 1]);
-      return;
-    }
-    const idx = lines.findIndex((l) => l.key === key);
-    if (idx === lines.length - 1) {
-      const nk = addLine();
-      focusCell(nk, "name");
-    } else focusCell(lines[idx + 1].key, "name");
-  };
   const quickCreateItem = async (key, name) => {
     const rec = await actions.saveItem({ name, brand: "", category: "", unit: S.units[0] || "Pcs", packSize: "", saleRate: 0, purchaseRate: 0, stock: 0, minStock: 0, active: true });
     update(key, { itemId: rec.id, name: rec.name });
@@ -1062,12 +1207,28 @@ function NewPurchase({ db, derived, actions, go, S, editId }) {
         _oldLines: editing ? editLines : []
       };
       const res = await actions.savePurchase(payload);
-      toast(`Purchase ${res.purchase.billNo} saved \u2713 Stock updated`);
-      go("purchases");
+      if (editing) {
+        toast(`Purchase ${res.purchase.billNo} saved \u2713 Stock updated`);
+        go("purchases");
+      } else {
+        setSavedInfo({ billNo: res.purchase.billNo, total: res.purchase.total });
+      }
     } catch (e) {
       toast("Save failed: " + (e.message || e), "err");
     }
     setSaving(false);
+  };
+  const saveAndNew = () => {
+    setSavedInfo(null);
+    const newLines = [emptyPLine(), emptyPLine()];
+    setDate(today());
+    setPartyName("");
+    setPartyId("");
+    setLines(newLines);
+    setOther(0);
+    setPaidNow("");
+    setNotes("");
+    focusCell(newLines[0].key, "name");
   };
   const cellCls = "w-full px-2 py-1.5 text-[13px] bg-zinc-800 border border-zinc-700 text-zinc-100 rounded-md focus:border-red-500 focus:ring-2 focus:ring-red-500/30";
   const gridCols = "grid grid-cols-[34px_minmax(200px,2fr)_84px_100px_110px_34px] gap-1.5 items-center";
@@ -1103,16 +1264,17 @@ function NewPurchase({ db, derived, actions, go, S, editId }) {
         allowCreate: true,
         onCreate: (name) => quickCreateItem(l.key, name),
         className: cellCls,
-        inputRef: (el) => refs.current[`${l.key}:name`] = el,
-        onEnterEmpty: (e) => onKey(e, l.key, "name"),
+        inputRef: setCellRef(l.key, "name"),
+        onEnterEmpty: (e) => onKey(e, l.key, "name", lines, addLine),
+        onArrow: onArrow(l.key, "name", lines),
         placeholder: "Item name\u2026",
         render: (o) => /* @__PURE__ */ React.createElement("div", { className: "flex justify-between" }, /* @__PURE__ */ React.createElement("span", { className: "font-medium" }, o.label), /* @__PURE__ */ React.createElement("span", { className: "text-[11px] text-zinc-500 num" }, "cost ", fmt(o.item.purchaseRate, cur), " \xB7 stk ", fq(o.item.stock)))
       }
-    ), /* @__PURE__ */ React.createElement("input", { ref: (el) => refs.current[`${l.key}:qty`] = el, value: l.qty, onChange: (e) => update(l.key, { qty: e.target.value }), onKeyDown: (e) => onKey(e, l.key, "qty"), className: cellCls + " text-center num font-semibold", placeholder: "0", inputMode: "decimal" }), /* @__PURE__ */ React.createElement("input", { ref: (el) => refs.current[`${l.key}:rate`] = el, value: l.rate, onChange: (e) => update(l.key, { rate: e.target.value }), onKeyDown: (e) => onKey(e, l.key, "rate"), className: cellCls + " text-right num", placeholder: "0.00", inputMode: "decimal" }), /* @__PURE__ */ React.createElement("div", { className: "text-right text-[13px] font-bold num pr-1" }, n2(l.qty) * n2(l.rate) > 0 ? fq(n2(l.qty) * n2(l.rate)) : "\u2014"), /* @__PURE__ */ React.createElement("button", { tabIndex: -1, onClick: () => removeLine(l.key), className: "w-7 h-7 rounded-md text-red-400 hover:bg-red-950/40 text-sm" }, "\u2715"));
+    ), /* @__PURE__ */ React.createElement("input", { ref: setCellRef(l.key, "qty"), value: l.qty, onChange: (e) => update(l.key, { qty: e.target.value }), onKeyDown: (e) => onKey(e, l.key, "qty", lines, addLine), className: cellCls + " text-center num font-semibold", placeholder: "0", inputMode: "decimal" }), /* @__PURE__ */ React.createElement("input", { ref: setCellRef(l.key, "rate"), value: l.rate, onChange: (e) => update(l.key, { rate: e.target.value }), onKeyDown: (e) => onKey(e, l.key, "rate", lines, addLine), className: cellCls + " text-right num", placeholder: "0.00", inputMode: "decimal" }), /* @__PURE__ */ React.createElement("div", { className: "text-right text-[13px] font-bold num pr-1" }, n2(l.qty) * n2(l.rate) > 0 ? fq(n2(l.qty) * n2(l.rate)) : "\u2014"), /* @__PURE__ */ React.createElement("button", { tabIndex: -1, onClick: () => removeLine(l.key), className: "w-7 h-7 rounded-md text-red-400 hover:bg-red-950/40 text-sm" }, "\u2715"));
   }), /* @__PURE__ */ React.createElement(Btn, { kind: "soft", size: "sm", className: "mt-2", onClick: () => {
     const k = addLine();
     focusCell(k, "name");
-  } }, "+ Add row"))), /* @__PURE__ */ React.createElement("div", { className: "grid md:grid-cols-2 gap-3" }, /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800 p-4" }, /* @__PURE__ */ React.createElement("h3", { className: "text-xs font-bold uppercase tracking-wide text-zinc-500 mb-3" }, "Payment to supplier"), /* @__PURE__ */ React.createElement("div", { className: "grid grid-cols-2 gap-3" }, /* @__PURE__ */ React.createElement(Field, { label: `Paid now (${cur})` }, /* @__PURE__ */ React.createElement(Input, { value: paidNow, onChange: (e) => setPaidNow(e.target.value), inputMode: "decimal", placeholder: "0", disabled: !!editing })), /* @__PURE__ */ React.createElement(Field, { label: "Mode" }, /* @__PURE__ */ React.createElement(Select, { value: payMode, onChange: (e) => setPayMode(e.target.value) }, S.payModes.map((m) => /* @__PURE__ */ React.createElement("option", { key: m }, m)))))), /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800 p-4" }, /* @__PURE__ */ React.createElement("div", { className: "flex justify-between text-sm py-1 text-zinc-400" }, /* @__PURE__ */ React.createElement("span", null, "Sub total"), /* @__PURE__ */ React.createElement("b", { className: "num" }, fmt(subTotal, cur))), /* @__PURE__ */ React.createElement("div", { className: "flex justify-between items-center text-sm py-1 text-zinc-400" }, /* @__PURE__ */ React.createElement("span", null, "Other charges (transport etc.)"), /* @__PURE__ */ React.createElement("input", { value: other, onChange: (e) => setOther(e.target.value), className: "w-24 px-2 py-1 text-right text-sm bg-zinc-800 border border-zinc-700 text-zinc-100 rounded-md focus:border-red-500 focus:ring-2 focus:ring-red-500/30 num", inputMode: "decimal" })), /* @__PURE__ */ React.createElement("div", { className: "flex justify-between text-base py-2 mt-1 border-t border-zinc-800 font-extrabold text-zinc-100" }, /* @__PURE__ */ React.createElement("span", null, "TOTAL"), /* @__PURE__ */ React.createElement("span", { className: "num" }, fmt(total, cur))), /* @__PURE__ */ React.createElement(Btn, { kind: "brand", className: "w-full mt-3", disabled: saving, onClick: save }, saving ? "Saving\u2026" : editing ? "Update Purchase" : "Save Purchase"))));
+  } }, "+ Add row"))), /* @__PURE__ */ React.createElement("div", { className: "grid md:grid-cols-2 gap-3" }, /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800 p-4" }, /* @__PURE__ */ React.createElement("h3", { className: "text-xs font-bold uppercase tracking-wide text-zinc-500 mb-3" }, "Payment to supplier"), /* @__PURE__ */ React.createElement("div", { className: "grid grid-cols-2 gap-3" }, /* @__PURE__ */ React.createElement(Field, { label: `Paid now (${cur})` }, /* @__PURE__ */ React.createElement(Input, { value: paidNow, onChange: (e) => setPaidNow(e.target.value), inputMode: "decimal", placeholder: "0", disabled: !!editing })), /* @__PURE__ */ React.createElement(Field, { label: "Mode" }, /* @__PURE__ */ React.createElement(Select, { value: payMode, onChange: (e) => setPayMode(e.target.value) }, S.payModes.map((m) => /* @__PURE__ */ React.createElement("option", { key: m }, m)))))), /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800 p-4" }, /* @__PURE__ */ React.createElement("div", { className: "flex justify-between text-sm py-1 text-zinc-400" }, /* @__PURE__ */ React.createElement("span", null, "Sub total"), /* @__PURE__ */ React.createElement("b", { className: "num" }, fmt(subTotal, cur))), /* @__PURE__ */ React.createElement("div", { className: "flex justify-between items-center text-sm py-1 text-zinc-400" }, /* @__PURE__ */ React.createElement("span", null, "Other charges (transport etc.)"), /* @__PURE__ */ React.createElement("input", { value: other, onChange: (e) => setOther(e.target.value), className: "w-24 px-2 py-1 text-right text-sm bg-zinc-800 border border-zinc-700 text-zinc-100 rounded-md focus:border-red-500 focus:ring-2 focus:ring-red-500/30 num", inputMode: "decimal" })), /* @__PURE__ */ React.createElement("div", { className: "flex justify-between text-base py-2 mt-1 border-t border-zinc-800 font-extrabold text-zinc-100" }, /* @__PURE__ */ React.createElement("span", null, "TOTAL"), /* @__PURE__ */ React.createElement("span", { className: "num" }, fmt(total, cur))), /* @__PURE__ */ React.createElement(Btn, { kind: "brand", className: "w-full mt-3", disabled: saving, onClick: save }, saving ? "Saving\u2026" : editing ? "Update Purchase" : "Save Purchase"))), savedInfo && /* @__PURE__ */ React.createElement(SaveConfirmModal, { label: `Purchase ${savedInfo.billNo}`, amount: savedInfo.total, cur, onSaveNew: saveAndNew, onDone: () => { setSavedInfo(null); go("purchases"); } }));
 }
 function PurchaseList({ db, derived, actions, go, S }) {
   const cur = S.currency;

@@ -10,7 +10,7 @@ Resume rule: read this file, find the first module NOT marked `[DONE]`, start th
 ## Modules
 
 - [DONE] Module 0 — Global dark re-theme — 2026-07-04
-- [ ] Module 1 — Keyboard core + Confirm-on-Save + Command Palette
+- [DONE] Module 1 — Keyboard core + Confirm-on-Save + Command Palette — 2026-07-04
 - [ ] Module 2 — Customer & Supplier CRM depth
 - [ ] Module 3 — Opening Bills (OpeningBalances)
 - [ ] Module 4 — Sales Suite (Quotation → SO → Invoice → Return)
@@ -39,6 +39,24 @@ Verified visually in a real Chromium browser (Playwright) against the mock-mode 
 incl. low-stock alert, New Sale incl. keyboard-focus ring on a billing-grid cell, Item/Party/
 Payment modals, Purchase, Reports incl. Outstanding tab, Settings. Print view intentionally left
 light/white (untouched) since it's meant to be printed on paper.
+
+## Module 1 detail
+Added `useGridNav(flow)` — one shared hook (Tab native, Enter → next field / commit+new-row,
+Arrow Up/Down → same field prev/next row) — and refactored New Sale and New Purchase to use it
+instead of each keeping its own copy-pasted focus/keydown logic. Taught `AutoComplete` an
+optional `onArrow` prop so item-name cells can hand Up/Down back to the grid once there's no
+live query to browse (a query with real matches still lets arrows browse the suggestion
+dropdown) — pickers that don't pass `onArrow` (Party Ledger search, Payment modal) keep their
+original arrow-browses-suggestions behavior untouched, zero regression risk there.
+Added `SaveConfirmModal` ("Invoice INV-4 saved ✓ — ₹1,240" / Save & New (Enter, default) / Done)
+and wired it into both New Sale and New Purchase for new (non-edit) documents — editing an
+existing document still saves straight back to its list, since "Save & New" doesn't make sense
+mid-edit. Added `CommandPalette` (Ctrl/Cmd+K — searches pages, parties, items, recent invoices,
+arrow+Enter to navigate) and `ShortcutSheet` ("?" — lists every shortcut), both wired at the App
+shell level. Ctrl/Cmd+N jumps to New Sale from anywhere (the most common "new entry" action).
+Verified in a real browser: grid Enter-flow, Arrow-Down jumping to the same column on the next
+row, Save & New resetting the form and refocusing row 1, the command palette's live search, and
+the shortcut sheet — for both New Sale and New Purchase.
 
 ## Notes
 - Testing method: mock mode only (localStorage mockServer, IS_GAS=false), verified by opening
