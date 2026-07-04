@@ -1,4 +1,10 @@
 /**
+ * ROLLBACK SNAPSHOT — frozen copy of Code.gs from before the 12-module build started.
+ * This is a deliberate point-in-time backup, not a file that's kept in sync with Code.gs
+ * as the app evolves — it will legitimately drift from the current SCHEMA/DEFAULT_SETTINGS
+ * on every later module, and that's the point: it's what you restore if something needs
+ * reverting to the pre-build state. Do not "fix" it to match Code.gs.
+ *
  * XL TRADERS ERP — Google Apps Script Backend
  * ---------------------------------------------------------------
  * Database  : Google Sheets (this bound spreadsheet)

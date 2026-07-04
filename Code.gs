@@ -85,10 +85,12 @@ var DEFAULT_SETTINGS = {
 
 // ================= WEB APP ENTRY =================
 function doGet() {
+  // Default frame protection (no ALLOWALL): this app runs authenticated, session-bearing
+  // actions on every page, so letting any external site iframe it would open the door to
+  // clickjacking. Nothing here needs cross-site embedding.
   return HtmlService.createHtmlOutputFromFile('Index')
     .setTitle('XL Traders ERP')
-    .addMetaTag('viewport', 'width=device-width, initial-scale=1, maximum-scale=1')
-    .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+    .addMetaTag('viewport', 'width=device-width, initial-scale=1, maximum-scale=1');
 }
 
 // ================= LOW-LEVEL HELPERS =================
@@ -209,6 +211,7 @@ function deleteChildren_(name, column, value) {
 function nextCounter_(key) {
   var sh = getSheet_('Counters');
   var last = sh.getLastRow();
+  if (last < 2) { sh.appendRow([key, 1]); return 1; }
   var values = sh.getRange(2, 1, last - 1, 2).getValues();
   for (var i = 0; i < values.length; i++) {
     if (values[i][0] === key) {
@@ -270,9 +273,14 @@ function withLock_(fn) {
 
 /** Throws unless the caller is an active Owner — server-side check for the Admin & Roles
  * screen so the UI-level nav gating on the client is never the only thing standing
- * between a Staff account and the Users sheet. */
+ * between a Staff account and the Users sheet.
+ * Session.getActiveUser().getEmail() can return '' depending on how this web app is
+ * deployed (e.g. "Execute as: Me" with a viewer outside the developer's domain) — an
+ * empty string must never be treated as a matchable identity, or every such visitor
+ * would collide on the same blank-email row. Fail closed instead. */
 function requireOwner_() {
   var myEmail = Session.getActiveUser().getEmail();
+  if (!myEmail) throw new Error('Could not verify your identity — only an Owner can do this.');
   var me = readAll_('Users').find(function(u) { return u.email === myEmail && u.active !== false; });
   if (!me || me.role !== 'Owner') throw new Error('Only an Owner can do this.');
 }
@@ -295,15 +303,19 @@ function bootstrap() {
   var users = readAll_('Users');
   var myEmail = Session.getActiveUser().getEmail();
   // First person to ever open the app becomes Owner automatically — otherwise nobody
-  // could ever reach the Admin screen to grant the first role.
-  if (users.length === 0) {
+  // could ever reach the Admin screen to grant the first role. Guarded on a non-empty
+  // email: getActiveUser().getEmail() can return '' depending on deployment mode (see
+  // requireOwner_), and an empty-email "Owner" row would match every other visitor
+  // whose identity also can't be verified, silently handing out Owner to everyone.
+  if (users.length === 0 && myEmail) {
     var owner = upsert_('Users', { email: myEmail, name: '', role: 'Owner', active: true });
     users = [owner];
   }
-  var me = users.find(function(u) { return u.email === myEmail && u.active !== false; });
-  // Unknown/inactive users default to Staff (least privilege) rather than being blocked
-  // outright — they already have edit access to the underlying Sheet via Google sharing,
-  // so silently locking them out of the UI would just be confusing, not actually secure.
+  var me = myEmail && users.find(function(u) { return u.email === myEmail && u.active !== false; });
+  // Unknown/inactive users — and anyone whose identity couldn't be verified at all —
+  // default to Staff (least privilege) rather than being blocked outright; they already
+  // have edit access to the underlying Sheet via Google sharing, so silently locking them
+  // out of the UI would just be confusing, not actually secure.
   var currentUser = { email: myEmail, role: me ? me.role : 'Staff' };
   return JSON.stringify({
     settings: settings,
@@ -379,8 +391,11 @@ function apiSaveInvoice(payloadJson) {
 
     adjustStock_(deltas);
 
-    // Record initial payment (Payments sheet = source of truth)
-    if (payload.payment && Number(payload.payment.amount) > 0) {
+    // Record initial payment (Payments sheet = source of truth). Only on create: the
+    // client already withholds payload.payment on edits, but this is enforced here too,
+    // server-side, so a stray/replayed edit call can never mint a second payment row for
+    // the same "amount received with this invoice" moment.
+    if (!isEdit && payload.payment && Number(payload.payment.amount) > 0) {
       upsert_('Payments', {
         date: inv.date,
         partyId: inv.partyId,
@@ -459,7 +474,8 @@ function apiSavePurchase(payloadJson) {
     adjustStock_(deltas);
     updateItemCosts_(costMap);
 
-    if (payload.payment && Number(payload.payment.amount) > 0) {
+    // Only on create — see the matching comment in apiSaveInvoice.
+    if (!isEdit && payload.payment && Number(payload.payment.amount) > 0) {
       upsert_('Payments', {
         date: pur.date,
         partyId: pur.partyId,
@@ -677,6 +693,7 @@ function apiSaveSalesReturn(payloadJson) {
     var payload = JSON.parse(payloadJson);
     var sr = payload.salesReturn;
     var lines = payload.items || [];
+    var isEdit = !!sr.id && findRow_('SalesReturns', sr.id) > 0;
     if (!sr.id) {
       var settings = getSettings_();
       sr.id = Utilities.getUuid().slice(0, 8);
@@ -687,6 +704,15 @@ function apiSaveSalesReturn(payloadJson) {
     sr = upsert_('SalesReturns', sr);
 
     var deltas = {};
+    // Re-saving an existing return must replace its lines, not append to them — otherwise
+    // stale rows pile up in SalesReturnItems and the stock-back-IN delta gets double-applied
+    // every time the same return is saved again.
+    if (isEdit) {
+      var oldLines = deleteChildren_('SalesReturnItems', 'salesReturnId', sr.id);
+      oldLines.forEach(function(l) {
+        if (l.itemId) deltas[l.itemId] = (deltas[l.itemId] || 0) - Number(l.qty || 0); // reverse old IN
+      });
+    }
     if (lines.length) {
       var rows = lines.map(function(l) {
         l.id = l.id || Utilities.getUuid().slice(0, 8);
@@ -851,6 +877,7 @@ function apiSavePurchaseReturn(payloadJson) {
     var payload = JSON.parse(payloadJson);
     var pr = payload.purchaseReturn;
     var lines = payload.items || [];
+    var isEdit = !!pr.id && findRow_('PurchaseReturns', pr.id) > 0;
     if (!pr.id) {
       var settings = getSettings_();
       pr.id = Utilities.getUuid().slice(0, 8);
@@ -861,6 +888,15 @@ function apiSavePurchaseReturn(payloadJson) {
     pr = upsert_('PurchaseReturns', pr);
 
     var deltas = {};
+    // Same replace-not-append rule as apiSaveSalesReturn: re-saving an existing return
+    // must undo its old stock-OUT delta before applying the new one, or the same units
+    // get deducted from stock again on every re-save.
+    if (isEdit) {
+      var oldLines = deleteChildren_('PurchaseReturnItems', 'purchaseReturnId', pr.id);
+      oldLines.forEach(function(l) {
+        if (l.itemId) deltas[l.itemId] = (deltas[l.itemId] || 0) + Number(l.qty || 0); // reverse old OUT
+      });
+    }
     if (lines.length) {
       var rows = lines.map(function(l) {
         l.id = l.id || Utilities.getUuid().slice(0, 8);

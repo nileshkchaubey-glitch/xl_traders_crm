@@ -265,17 +265,15 @@ Done and confirmed it dropped out of both the default worklist view and the Dash
 (2 → 1), then confirmed "Show completed" brought it back with a strikethrough note and a DONE
 badge.
 
-## Notes
+## Module 9 notes
 - Testing method: mock mode only (localStorage mockServer, IS_GAS=false), verified by opening
   Index.html directly in a browser (Playwright/Chromium) — no Google login is available in this
   environment, so live-Sheet testing is the human's job after each module (see bottom of
   ONESHOT_PROMPT1.md for the exact 3 steps).
-- Known pre-existing minor UX nit (not introduced by Module 6, not fixed here): `PartyDetail`'s
-  balance subtitle labels any negative balance "Advance" regardless of party type. For a Supplier,
-  a negative balance means we owe them (payable), not that they've paid in advance — the label
-  should probably read "Payable" for suppliers and "Advance" only for customers. Flagged for a
-  later polish pass rather than fixed now since it touches balance-label wording used everywhere,
-  not just the Purchase Suite.
+- Known pre-existing minor UX nit (not introduced by Module 6): `PartyDetail`'s balance subtitle
+  labeled any negative balance "Advance" regardless of party type. For a Supplier, a negative
+  balance means we owe them (payable), not that they've paid in advance. **Fixed in Module 12** —
+  now reads "Payable" for a Supplier and "Advance" only for a Customer.
 
 ## Module 10 detail
 **Scope decision made explicit (read this before touching roles again):** this app has no separate
@@ -341,7 +339,7 @@ chart and Sales monthly chart both render bars proportional to the correct under
 triggered CSV downloads from P&L and Sales tabs and confirmed the browser's download event fired
 with the expected filename; confirmed the Outstanding aging-bucket chart's ₹750 in the 31–60 day
 bucket matches the sum of the two unpaid invoices shown in the table beneath it; and confirmed the
-whole-database export from Settings now includes all ten completed entity sections (previously
+whole-database export from Settings now includes all eleven exported sections (previously
 five), not just the ones that existed when that button was first built.
 
 ## Module 12 detail — Final QA pass

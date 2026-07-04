@@ -239,7 +239,8 @@ async function mockServer(fn, args) {
         db.invoiceItems.push(l);
       });
       stockAdj(deltas);
-      if (p.payment && n2(p.payment.amount) > 0) db.payments.push({ id: uid(), date: inv.date, partyId: inv.partyId, partyName: inv.partyName, refType: "Sale", refId: inv.id, amount: n2(p.payment.amount), mode: p.payment.mode || "Cash", direction: "In", notes: "Received with invoice " + inv.invNo });
+      // Only on create — matches the isEdit guard in apiSaveInvoice (Code.gs).
+      if (idx < 0 && p.payment && n2(p.payment.amount) > 0) db.payments.push({ id: uid(), date: inv.date, partyId: inv.partyId, partyName: inv.partyName, refType: "Sale", refId: inv.id, amount: n2(p.payment.amount), mode: p.payment.mode || "Cash", direction: "In", notes: "Received with invoice " + inv.invNo });
       mockSave(db);
       return { ok: true, invoice: inv, items: db.invoiceItems.filter((l) => l.invoiceId === inv.id) };
     }
@@ -288,7 +289,8 @@ async function mockServer(fn, args) {
       db.items.forEach((it) => {
         if (costMap[it.id] > 0) it.purchaseRate = costMap[it.id];
       });
-      if (p.payment && n2(p.payment.amount) > 0) db.payments.push({ id: uid(), date: pur.date, partyId: pur.partyId, partyName: pur.partyName, refType: "Purchase", refId: pur.id, amount: n2(p.payment.amount), mode: p.payment.mode || "Cash", direction: "Out", notes: "Paid with bill " + pur.billNo });
+      // Only on create — matches the isEdit guard in apiSavePurchase (Code.gs).
+      if (idx < 0 && p.payment && n2(p.payment.amount) > 0) db.payments.push({ id: uid(), date: pur.date, partyId: pur.partyId, partyName: pur.partyName, refType: "Purchase", refId: pur.id, amount: n2(p.payment.amount), mode: p.payment.mode || "Cash", direction: "Out", notes: "Paid with bill " + pur.billNo });
       mockSave(db);
       return { ok: true, purchase: pur, items: db.purchaseItems.filter((l) => l.purchaseId === pur.id) };
     }
@@ -446,6 +448,7 @@ async function mockServer(fn, args) {
     case "apiSaveSalesReturn": {
       const p = parse(args[0]);
       const sr = p.salesReturn;
+      const isEdit = db.salesReturns.some((x) => x.id === sr.id);
       const deltas = {};
       if (!sr.id) {
         sr.id = uid();
@@ -456,6 +459,14 @@ async function mockServer(fn, args) {
       }
       const idx = db.salesReturns.findIndex((x) => x.id === sr.id);
       idx >= 0 ? db.salesReturns[idx] = sr : db.salesReturns.push(sr);
+      // Replace, not append: re-saving an existing return must undo its old stock-back-IN
+      // delta before applying the new one, matching apiSaveSalesReturn in Code.gs.
+      if (isEdit) {
+        db.salesReturnItems.filter((l) => l.salesReturnId === sr.id).forEach((l) => {
+          if (l.itemId) deltas[l.itemId] = (deltas[l.itemId] || 0) - n2(l.qty);
+        });
+        db.salesReturnItems = db.salesReturnItems.filter((l) => l.salesReturnId !== sr.id);
+      }
       p.items.forEach((l) => {
         l.id = l.id || uid();
         l.salesReturnId = sr.id;
@@ -498,6 +509,7 @@ async function mockServer(fn, args) {
     case "apiSavePurchaseReturn": {
       const p = parse(args[0]);
       const pr = p.purchaseReturn;
+      const isEdit = db.purchaseReturns.some((x) => x.id === pr.id);
       const deltas = {};
       if (!pr.id) {
         pr.id = uid();
@@ -508,6 +520,14 @@ async function mockServer(fn, args) {
       }
       const idx = db.purchaseReturns.findIndex((x) => x.id === pr.id);
       idx >= 0 ? db.purchaseReturns[idx] = pr : db.purchaseReturns.push(pr);
+      // Replace, not append: re-saving an existing return must undo its old stock-OUT
+      // delta before applying the new one, matching apiSavePurchaseReturn in Code.gs.
+      if (isEdit) {
+        db.purchaseReturnItems.filter((l) => l.purchaseReturnId === pr.id).forEach((l) => {
+          if (l.itemId) deltas[l.itemId] = (deltas[l.itemId] || 0) + n2(l.qty);
+        });
+        db.purchaseReturnItems = db.purchaseReturnItems.filter((l) => l.purchaseReturnId !== pr.id);
+      }
       p.items.forEach((l) => {
         l.id = l.id || uid();
         l.purchaseReturnId = pr.id;
