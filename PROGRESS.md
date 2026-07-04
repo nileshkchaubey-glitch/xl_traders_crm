@@ -14,7 +14,7 @@ Resume rule: read this file, find the first module NOT marked `[DONE]`, start th
 - [DONE] Module 2 — Customer & Supplier CRM depth — 2026-07-04
 - [DONE] Module 3 — Opening Bills (OpeningBalances) — 2026-07-04
 - [DONE] Module 4 — Sales Suite (Quotation → SO → Invoice → Return) — 2026-07-04
-- [ ] Module 5 — Dispatch Tracking + Cash/Credit Sale Type + Payment Risk Alert
+- [DONE] Module 5 — Dispatch Tracking + Cash/Credit Sale Type + Payment Risk Alert — 2026-07-04
 - [ ] Module 6 — Purchase Suite (Purchase Return + supplier bill matching)
 - [ ] Module 7 — Bulk Payment Entry
 - [ ] Module 8 — Products, Categories, Brands, Stock Ledger
@@ -133,32 +133,53 @@ external library) to the Invoice view. PDF conversion can't be exercised here (n
 runtime in this environment) — the mock server returns `base64: null` and the client falls back
 to the existing print dialog, which the human should verify for real after deploying.
 
+## Module 5 detail
+Added `billType`, `dispatchStatus`, `dispatchedAt` to `Invoices` and a `DispatchLog` sheet
+(audit trail only — never adjusts stock; stock still only moves once, at Invoice save,
+exactly as every earlier module). `dispatchStatus` defaults to `'Pending'` enforced
+**server-side** in `apiSaveInvoice` (not just left to the client) — a brand new invoice
+always starts undispatched no matter what the client sends, since printing a bill isn't
+the same as the goods leaving. `apiMarkDispatch` flips the flag both ways (Dispatched ⇄
+Pending/Reverted) and appends exactly one `DispatchLog` row per action.
+New Sale gained a Cash/Credit segmented toggle next to the Payment card header (`billType`,
+independent of `payMode` — the existing "how was it actually paid" field). Sales List gained
+a dispatch-status badge + "Mark Dispatched" (small modal: optional vehicle no/transporter/
+notes) / "Revert" per row, and a "Pending Dispatch" filter pill alongside the existing ones.
+Dashboard gained two conditional cards: "Goods Pending Dispatch" (count + quick list, links
+to Sales List pre-filtered) and "Cash Sales — Payment Not Received" (red, intentionally
+narrower than the Outstanding report — only Cash-terms invoices that have already shipped
+but aren't paid, since that's a harder-to-collect anomaly a normal credit sale isn't).
+Verified every line of the module's own acceptance checklist in a real browser: created a
+Cash-terms invoice through the actual UI and confirmed it started `Pending`; marked it
+Dispatched and confirmed exactly one DispatchLog row was written and the "Pending Dispatch"
+filter correctly dropped it to zero matches; then seeded the three boundary-case invoices
+(Cash+Unpaid+Dispatched, Credit+Unpaid+Dispatched, Cash+Paid+Dispatched) and confirmed the
+risk card showed exactly the first case and correctly excluded the other two.
+
 ## Notes
 - Testing method: mock mode only (localStorage mockServer, IS_GAS=false), verified by opening
   Index.html directly in a browser (Playwright/Chromium) — no Google login is available in this
   environment, so live-Sheet testing is the human's job after each module (see bottom of
   ONESHOT_PROMPT1.md for the exact 3 steps).
 
-## STATUS AS OF 2026-07-04 — resume from Module 5
+## STATUS AS OF 2026-07-04 — resume from Module 6
 
-**Fully done, verified, committed:** Modules 0, 1, 2, 3, 4 (dark re-theme, keyboard core, CRM
-depth, opening balances, full Quotation→Sales Order→Invoice→Sales Return suite). Each was checked
-by actually running the app in a headless Chromium browser against the mock server, not just read
-for correctness — the Module 4 verification traced one Quotation all the way through both
-conversions to a real Invoice (confirming stock only moves at the Invoice step, not before) and
-then through a partial Sales Return (confirming stock, party balance, and the Outstanding/Ledger
-math all land on the same numbers).
+**Fully done, verified, committed:** Modules 0–5 (dark re-theme, keyboard core, CRM depth,
+opening balances, full Quotation→Sales Order→Invoice→Sales Return suite, dispatch tracking +
+cash/credit risk alert). Each was checked by actually running the app in a headless Chromium
+browser against the mock server, not just read for correctness — Module 5's verification worked
+through every boundary case in its own acceptance checklist (Cash+Unpaid+Dispatched shown on the
+risk card, Credit+Unpaid+Dispatched and Cash+Paid+Dispatched both correctly excluded).
 
-**Not started: Modules 5–12.** This is the honest state — the remaining modules (Dispatch
-tracking, Purchase Returns, Bulk Payment Entry, Categories/Brands/Stock Ledger, Follow-up CRM,
-Admin/Roles, Reports/Charts, and the final QA pass) are still substantial, comparable to Modules
-0–4 combined. Building all of them to the same standard (real schema changes, real mock-server
-parity, real browser verification, no placeholders) in one sitting was not realistic without
-either rushing the quality bar or silently stopping partway through a module. Stopping at a clean
-module boundary, with everything so far genuinely finished and tested, was the more honest choice.
+**Not started: Modules 6–12.** This is the honest state — the remaining modules (Purchase
+Returns, Bulk Payment Entry, Categories/Brands/Stock Ledger, Follow-up CRM, Admin/Roles,
+Reports/Charts, and the final QA pass) are still substantial. Building all of them to the same
+standard (real schema changes, real mock-server parity, real browser verification, no
+placeholders) in one sitting was not realistic without either rushing the quality bar or silently
+stopping partway through a module. Stopping at a clean module boundary, with everything so far
+genuinely finished and tested, was the more honest choice.
 
 **To resume:** open a new session against this same branch/repo, tell Claude "read PROGRESS.md,
-resume from Module 5," and it starts on Dispatch Tracking + Cash/Credit Sale Type + Payment Risk
-Alert (a status flag on the existing Invoice, a DispatchLog audit sheet, and the dashboard's
-"Cash sale, dispatched, still unpaid" anomaly card — see the module's acceptance checklist in
-ONESHOT_PROMPT1.md for the exact boundary cases to verify).
+resume from Module 6," and it starts on the Purchase Suite (PurchaseReturns mirroring the Sales
+Return pattern already built in Module 4 — reversed: stock OUT, payable reduced — plus a
+supplierInvoiceNo field and search on Purchases).

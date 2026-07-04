@@ -17,7 +17,7 @@ var SCHEMA = {
   Items: ['id','name','brand','category','unit','packSize','saleRate','purchaseRate','stock','minStock','active'],
   Parties: ['id','name','type','phone','address','gstin','openingBalance','notes','category','visitingCardUrl'],
   PartyContacts: ['id','partyId','name','role','phone','whatsapp'],
-  Invoices: ['id','invNo','date','partyId','partyName','subTotal','discount','taxPct','taxAmt','total','payMode','status','notes','createdAt','sourceType','sourceId'],
+  Invoices: ['id','invNo','date','partyId','partyName','subTotal','discount','taxPct','taxAmt','total','payMode','status','notes','createdAt','sourceType','sourceId','billType','dispatchStatus','dispatchedAt'],
   InvoiceItems: ['id','invoiceId','itemId','name','brand','packing','packs','qty','rate','amount','cost'],
   Purchases: ['id','billNo','date','partyId','partyName','subTotal','other','total','payMode','notes','createdAt'],
   PurchaseItems: ['id','purchaseId','itemId','name','qty','rate','amount'],
@@ -33,6 +33,10 @@ var SCHEMA = {
   SalesOrderItems: ['id','salesOrderId','itemId','name','brand','packing','packs','qty','rate','amount','cost'],
   SalesReturns: ['id','srNo','date','partyId','partyName','subTotal','taxAmt','total','status','notes','createdAt','sourceType','sourceId'],
   SalesReturnItems: ['id','salesReturnId','invoiceItemId','itemId','name','brand','packing','qty','rate','amount'],
+  // ---- Dispatch tracking (Module 5) — audit trail only, NEVER moves stock. Stock is
+  // deducted exactly once, at Invoice save; marking something Dispatched just flips a
+  // status flag and logs who/when, because printing a bill isn't the same as it leaving.
+  DispatchLog: ['id','invoiceId','invNo','partyName','action','vehicleNo','transporter','notes','timestamp','userEmail'],
   Settings: ['key','value'],
   Counters: ['key','value']
 };
@@ -275,7 +279,8 @@ function bootstrap() {
     salesOrders: readAll_('SalesOrders'),
     salesOrderItems: readAll_('SalesOrderItems'),
     salesReturns: readAll_('SalesReturns'),
-    salesReturnItems: readAll_('SalesReturnItems')
+    salesReturnItems: readAll_('SalesReturnItems'),
+    dispatchLog: readAll_('DispatchLog')
   });
 }
 
@@ -304,6 +309,11 @@ function apiSaveInvoice(payloadJson) {
         inv.invNo = settings.invPrefix + nextCounter_('INV');
       }
       inv.createdAt = new Date().toISOString();
+      // Enforced server-side, not just left to the client: a brand new invoice always
+      // starts undispatched, no matter what billType it is or what the client sent —
+      // printing a bill is not the same as the goods actually leaving.
+      inv.dispatchStatus = 'Pending';
+      inv.dispatchedAt = '';
     }
 
     inv = upsert_('Invoices', inv);
@@ -622,6 +632,45 @@ function apiDeleteSalesReturn(id) {
     deleteById_('Payments', id);
     deleteById_('SalesReturns', id);
     return JSON.stringify({ ok: true });
+  });
+}
+
+// ================= DISPATCH TRACKING (Module 5) =================
+/**
+ * Mark an invoice Dispatched or Revert it back to Pending. This is deliberately a status
+ * flag on the existing Invoice, not a new document type — the real workflow is "an
+ * invoice is printed, handed to a delivery person, and the goods may or may not leave
+ * that same day," not a second inventory-moving document. Stock was already deducted
+ * once, at Invoice save; this never touches it again. DispatchLog is audit-trail only.
+ * payload = { invoiceId, action: 'Dispatched'|'Reverted', vehicleNo, transporter, notes }
+ */
+function apiMarkDispatch(payloadJson) {
+  return withLock_(function() {
+    var payload = JSON.parse(payloadJson);
+    var row = findRow_('Invoices', payload.invoiceId);
+    if (row < 1) throw new Error('Invoice not found');
+    var headers = SCHEMA.Invoices;
+    var sh = getSheet_('Invoices');
+    var values = sh.getRange(row, 1, 1, headers.length).getValues()[0];
+    var dispatched = payload.action === 'Dispatched';
+    values[headers.indexOf('dispatchStatus')] = dispatched ? 'Dispatched' : 'Pending';
+    values[headers.indexOf('dispatchedAt')] = dispatched ? new Date().toISOString() : '';
+    sh.getRange(row, 1, 1, headers.length).setValues([values]);
+
+    var invNo = values[headers.indexOf('invNo')];
+    var partyName = values[headers.indexOf('partyName')];
+    upsert_('DispatchLog', {
+      invoiceId: payload.invoiceId,
+      invNo: invNo,
+      partyName: partyName,
+      action: payload.action,
+      vehicleNo: payload.vehicleNo || '',
+      transporter: payload.transporter || '',
+      notes: payload.notes || '',
+      timestamp: new Date().toISOString(),
+      userEmail: Session.getActiveUser().getEmail()
+    });
+    return JSON.stringify({ ok: true, dispatchStatus: dispatched ? 'Dispatched' : 'Pending', dispatchedAt: dispatched ? values[headers.indexOf('dispatchedAt')] : '' });
   });
 }
 
