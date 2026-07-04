@@ -130,7 +130,12 @@ function mockDB() {
     } catch (e) {
     }
   }
-  return { settings: null, items: [], parties: [], partyContacts: [], invoices: [], invoiceItems: [], purchases: [], purchaseItems: [], payments: [], openingBalances: [], counters: { INV: 0, PUR: 0 } };
+  return {
+    settings: null, items: [], parties: [], partyContacts: [], invoices: [], invoiceItems: [],
+    purchases: [], purchaseItems: [], payments: [], openingBalances: [],
+    quotations: [], quotationItems: [], salesOrders: [], salesOrderItems: [], salesReturns: [], salesReturnItems: [],
+    counters: { INV: 0, PUR: 0, QUO: 0, SO: 0, SR: 0 }
+  };
 }
 function mockSave(db) {
   localStorage.setItem(MOCK_KEY, JSON.stringify(db));
@@ -144,6 +149,9 @@ const MOCK_DEFAULT_SETTINGS = {
   bizGstin: "",
   invPrefix: "INV-",
   purPrefix: "PB-",
+  quoPrefix: "QUO-",
+  soPrefix: "SO-",
+  srPrefix: "SR-",
   taxEnabled: false,
   taxPct: 18,
   taxLabel: "GST",
@@ -170,6 +178,15 @@ async function mockServer(fn, args) {
       }
       if (!db.partyContacts) db.partyContacts = [];
       if (!db.openingBalances) db.openingBalances = [];
+      if (!db.quotations) db.quotations = [];
+      if (!db.quotationItems) db.quotationItems = [];
+      if (!db.salesOrders) db.salesOrders = [];
+      if (!db.salesOrderItems) db.salesOrderItems = [];
+      if (!db.salesReturns) db.salesReturns = [];
+      if (!db.salesReturnItems) db.salesReturnItems = [];
+      if (!db.counters.QUO) db.counters.QUO = 0;
+      if (!db.counters.SO) db.counters.SO = 0;
+      if (!db.counters.SR) db.counters.SR = 0;
       const { counters, ...rest } = db;
       return { ...rest, settings: { ...MOCK_DEFAULT_SETTINGS, ...db.settings } };
     }
@@ -304,6 +321,113 @@ async function mockServer(fn, args) {
       db.openingBalances = db.openingBalances.filter((x) => x.id !== args[0]);
       mockSave(db);
       return { ok: true };
+    case "apiMarkConverted": {
+      const p = parse(args[0]);
+      const list = p.sheet === "Quotations" ? db.quotations : db.salesOrders;
+      const row = list.find((x) => x.id === p.id);
+      if (row) row.status = "Converted";
+      mockSave(db);
+      return { ok: true };
+    }
+    case "apiSaveQuotation": {
+      const p = parse(args[0]);
+      const quo = p.quotation;
+      const idx = db.quotations.findIndex((x) => x.id === quo.id);
+      if (idx >= 0) {
+        db.quotationItems = db.quotationItems.filter((l) => l.quotationId !== quo.id);
+      } else if (!quo.quoNo) {
+        db.counters.QUO += 1;
+        quo.quoNo = (db.settings.quoPrefix || "QUO-") + db.counters.QUO;
+        quo.createdAt = (/* @__PURE__ */ new Date()).toISOString();
+        quo.status = quo.status || "Open";
+      }
+      if (!quo.id) quo.id = uid();
+      idx >= 0 ? db.quotations[idx] = quo : db.quotations.push(quo);
+      p.items.forEach((l) => {
+        l.id = l.id || uid();
+        l.quotationId = quo.id;
+        db.quotationItems.push(l);
+      });
+      mockSave(db);
+      return { ok: true, quotation: quo, items: db.quotationItems.filter((l) => l.quotationId === quo.id) };
+    }
+    case "apiDeleteQuotation": {
+      const id = args[0];
+      db.quotationItems = db.quotationItems.filter((l) => l.quotationId !== id);
+      db.quotations = db.quotations.filter((x) => x.id !== id);
+      mockSave(db);
+      return { ok: true };
+    }
+    case "apiSaveSalesOrder": {
+      const p = parse(args[0]);
+      const so = p.salesOrder;
+      const idx = db.salesOrders.findIndex((x) => x.id === so.id);
+      if (idx >= 0) {
+        db.salesOrderItems = db.salesOrderItems.filter((l) => l.salesOrderId !== so.id);
+      } else if (!so.soNo) {
+        db.counters.SO += 1;
+        so.soNo = (db.settings.soPrefix || "SO-") + db.counters.SO;
+        so.createdAt = (/* @__PURE__ */ new Date()).toISOString();
+        so.status = so.status || "Open";
+      }
+      if (!so.id) so.id = uid();
+      idx >= 0 ? db.salesOrders[idx] = so : db.salesOrders.push(so);
+      p.items.forEach((l) => {
+        l.id = l.id || uid();
+        l.salesOrderId = so.id;
+        db.salesOrderItems.push(l);
+      });
+      mockSave(db);
+      return { ok: true, salesOrder: so, items: db.salesOrderItems.filter((l) => l.salesOrderId === so.id) };
+    }
+    case "apiDeleteSalesOrder": {
+      const id = args[0];
+      db.salesOrderItems = db.salesOrderItems.filter((l) => l.salesOrderId !== id);
+      db.salesOrders = db.salesOrders.filter((x) => x.id !== id);
+      mockSave(db);
+      return { ok: true };
+    }
+    case "apiSaveSalesReturn": {
+      const p = parse(args[0]);
+      const sr = p.salesReturn;
+      const deltas = {};
+      if (!sr.id) {
+        sr.id = uid();
+        db.counters.SR += 1;
+        sr.srNo = (db.settings.srPrefix || "SR-") + db.counters.SR;
+        sr.createdAt = (/* @__PURE__ */ new Date()).toISOString();
+        sr.status = "Completed";
+      }
+      const idx = db.salesReturns.findIndex((x) => x.id === sr.id);
+      idx >= 0 ? db.salesReturns[idx] = sr : db.salesReturns.push(sr);
+      p.items.forEach((l) => {
+        l.id = l.id || uid();
+        l.salesReturnId = sr.id;
+        if (l.itemId) deltas[l.itemId] = (deltas[l.itemId] || 0) + n2(l.qty);
+        db.salesReturnItems.push(l);
+      });
+      stockAdj(deltas);
+      if (n2(sr.total) > 0 && sr.sourceId) {
+        const pIdx = db.payments.findIndex((x) => x.id === sr.id);
+        const paymentRow = { id: sr.id, date: sr.date, partyId: sr.partyId, partyName: sr.partyName, refType: "SalesReturn", refId: sr.sourceId, amount: n2(sr.total), mode: sr.srNo, direction: "In", notes: "Goods returned, return " + sr.srNo };
+        pIdx >= 0 ? db.payments[pIdx] = paymentRow : db.payments.push(paymentRow);
+      }
+      mockSave(db);
+      return { ok: true, salesReturn: sr, items: db.salesReturnItems.filter((l) => l.salesReturnId === sr.id) };
+    }
+    case "apiDeleteSalesReturn": {
+      const id = args[0];
+      const deltas = {};
+      db.salesReturnItems.filter((l) => l.salesReturnId === id).forEach((l) => {
+        if (l.itemId) deltas[l.itemId] = (deltas[l.itemId] || 0) - n2(l.qty);
+      });
+      stockAdj(deltas);
+      db.salesReturnItems = db.salesReturnItems.filter((l) => l.salesReturnId !== id);
+      db.payments = db.payments.filter((x) => x.id !== id);
+      db.salesReturns = db.salesReturns.filter((x) => x.id !== id);
+      mockSave(db);
+      return { ok: true };
+    }
     case "apiUploadVisitingCard": {
       const p = parse(args[0]);
       // No real Drive in local preview — a data: URL stands in so the
@@ -335,6 +459,9 @@ async function mockServer(fn, args) {
       db.settings = parse(args[0]);
       mockSave(db);
       return { ok: true };
+    case "apiHtmlToPdf":
+      // No real GAS PDF converter in local preview — caller falls back to window.print().
+      return { ok: true, base64: null };
     default:
       throw new Error("Unknown mock fn: " + fn);
   }
@@ -632,6 +759,11 @@ const NAV = [
     { id: "sales", icon: "\u{1F4CB}", label: "Sales List" },
     { id: "payments", icon: "\u{1F4B0}", label: "Payments" }
   ] },
+  { sec: "SALES SUITE", items: [
+    { id: "quotations", icon: "\u{1F4C4}", label: "Quotations" },
+    { id: "sales-orders", icon: "\u{1F4DD}", label: "Sales Orders" },
+    { id: "sales-returns", icon: "\u21A9\uFE0F", label: "Sales Returns" }
+  ] },
   { sec: "PURCHASE & STOCK", items: [
     { id: "new-purchase", icon: "\u{1F4E5}", label: "New Purchase" },
     { id: "purchases", icon: "\u{1F4E6}", label: "Purchase List" },
@@ -713,7 +845,18 @@ function App() {
     const linesByInvoice = {}, linesByPurchase = {};
     db.invoiceItems.forEach((l) => (linesByInvoice[l.invoiceId] = linesByInvoice[l.invoiceId] || []).push(l));
     db.purchaseItems.forEach((l) => (linesByPurchase[l.purchaseId] = linesByPurchase[l.purchaseId] || []).push(l));
-    return { itemMap, partyMap, paidByRef, partyBalance, linesByInvoice, linesByPurchase };
+    const linesByQuotation = {}, linesBySalesOrder = {}, linesBySalesReturn = {};
+    db.quotationItems.forEach((l) => (linesByQuotation[l.quotationId] = linesByQuotation[l.quotationId] || []).push(l));
+    db.salesOrderItems.forEach((l) => (linesBySalesOrder[l.salesOrderId] = linesBySalesOrder[l.salesOrderId] || []).push(l));
+    db.salesReturnItems.forEach((l) => (linesBySalesReturn[l.salesReturnId] = linesBySalesReturn[l.salesReturnId] || []).push(l));
+    // How much of each invoice line has already been returned, so the Sales Return
+    // screen can cap a line at (originally invoiced qty − already returned qty)
+    // instead of letting someone return the same goods twice.
+    const returnedQtyByInvoiceItem = {};
+    db.salesReturnItems.forEach((l) => {
+      if (l.invoiceItemId) returnedQtyByInvoiceItem[l.invoiceItemId] = (returnedQtyByInvoiceItem[l.invoiceItemId] || 0) + n2(l.qty);
+    });
+    return { itemMap, partyMap, paidByRef, partyBalance, linesByInvoice, linesByPurchase, linesByQuotation, linesBySalesOrder, linesBySalesReturn, returnedQtyByInvoiceItem };
   }, [db]);
   const mutate = (fn) => setDb((d) => fn(typeof structuredClone === "function" ? structuredClone(d) : JSON.parse(JSON.stringify(d))));
   const actions = useMemo(() => ({
@@ -789,6 +932,95 @@ function App() {
       });
       await gs("apiDeleteOpeningBalance", id);
       toast("Opening bill deleted");
+    },
+    saveQuotation: async (payload) => {
+      const res = await gs("apiSaveQuotation", JSON.stringify(payload));
+      mutate((d) => {
+        const i = d.quotations.findIndex((x) => x.id === res.quotation.id);
+        i >= 0 ? d.quotations[i] = res.quotation : d.quotations.push(res.quotation);
+        d.quotationItems = d.quotationItems.filter((l) => l.quotationId !== res.quotation.id).concat(res.items);
+        return d;
+      });
+      toast(`Quotation ${res.quotation.quoNo} saved`);
+      return res;
+    },
+    deleteQuotation: async (id) => {
+      mutate((d) => {
+        d.quotationItems = d.quotationItems.filter((l) => l.quotationId !== id);
+        d.quotations = d.quotations.filter((x) => x.id !== id);
+        return d;
+      });
+      await gs("apiDeleteQuotation", id);
+      toast("Quotation deleted");
+    },
+    saveSalesOrder: async (payload) => {
+      const res = await gs("apiSaveSalesOrder", JSON.stringify(payload));
+      mutate((d) => {
+        const i = d.salesOrders.findIndex((x) => x.id === res.salesOrder.id);
+        i >= 0 ? d.salesOrders[i] = res.salesOrder : d.salesOrders.push(res.salesOrder);
+        d.salesOrderItems = d.salesOrderItems.filter((l) => l.salesOrderId !== res.salesOrder.id).concat(res.items);
+        return d;
+      });
+      toast(`Sales Order ${res.salesOrder.soNo} saved`);
+      return res;
+    },
+    deleteSalesOrder: async (id) => {
+      mutate((d) => {
+        d.salesOrderItems = d.salesOrderItems.filter((l) => l.salesOrderId !== id);
+        d.salesOrders = d.salesOrders.filter((x) => x.id !== id);
+        return d;
+      });
+      await gs("apiDeleteSalesOrder", id);
+      toast("Sales Order deleted");
+    },
+    markConverted: async (sheet, id) => {
+      mutate((d) => {
+        const list = sheet === "Quotations" ? d.quotations : d.salesOrders;
+        const row = list.find((x) => x.id === id);
+        if (row) row.status = "Converted";
+        return d;
+      });
+      await gs("apiMarkConverted", JSON.stringify({ sheet, id }));
+    },
+    saveSalesReturn: async (payload) => {
+      const res = await gs("apiSaveSalesReturn", JSON.stringify(payload));
+      mutate((d) => {
+        const i = d.salesReturns.findIndex((x) => x.id === res.salesReturn.id);
+        i >= 0 ? d.salesReturns[i] = res.salesReturn : d.salesReturns.push(res.salesReturn);
+        d.salesReturnItems = d.salesReturnItems.filter((l) => l.salesReturnId !== res.salesReturn.id).concat(res.items);
+        const deltas = {};
+        res.items.forEach((l) => {
+          if (l.itemId) deltas[l.itemId] = (deltas[l.itemId] || 0) + n2(l.qty);
+        });
+        d.items.forEach((it) => {
+          if (deltas[it.id]) it.stock = n2(it.stock) + deltas[it.id];
+        });
+        if (n2(res.salesReturn.total) > 0 && res.salesReturn.sourceId) {
+          const pIdx = d.payments.findIndex((x) => x.id === res.salesReturn.id);
+          const paymentRow = { id: res.salesReturn.id, date: res.salesReturn.date, partyId: res.salesReturn.partyId, partyName: res.salesReturn.partyName, refType: "SalesReturn", refId: res.salesReturn.sourceId, amount: n2(res.salesReturn.total), mode: res.salesReturn.srNo, direction: "In", notes: "Goods returned, return " + res.salesReturn.srNo };
+          pIdx >= 0 ? d.payments[pIdx] = paymentRow : d.payments.push(paymentRow);
+        }
+        return d;
+      });
+      toast(`Sales Return ${res.salesReturn.srNo} saved ✓ Stock updated`);
+      return res;
+    },
+    deleteSalesReturn: async (id) => {
+      mutate((d) => {
+        const deltas = {};
+        d.salesReturnItems.filter((l) => l.salesReturnId === id).forEach((l) => {
+          if (l.itemId) deltas[l.itemId] = (deltas[l.itemId] || 0) - n2(l.qty);
+        });
+        d.items.forEach((it) => {
+          if (deltas[it.id]) it.stock = n2(it.stock) + deltas[it.id];
+        });
+        d.salesReturnItems = d.salesReturnItems.filter((l) => l.salesReturnId !== id);
+        d.payments = d.payments.filter((x) => x.id !== id);
+        d.salesReturns = d.salesReturns.filter((x) => x.id !== id);
+        return d;
+      });
+      await gs("apiDeleteSalesReturn", id);
+      toast("Sales Return deleted");
     },
     uploadVisitingCard: async (party, file) => {
       const base64 = await new Promise((resolve, reject) => {
@@ -933,7 +1165,7 @@ function App() {
   const ctx = { db, derived, actions, go, S: db.settings };
   const pages = {
     "dashboard": /* @__PURE__ */ React.createElement(Dashboard, { ...ctx }),
-    "new-sale": /* @__PURE__ */ React.createElement(NewSale, { ...ctx, ...pageProps, key: pageProps.editId || "new" }),
+    "new-sale": /* @__PURE__ */ React.createElement(NewSale, { ...ctx, ...pageProps, key: pageProps.editId || pageProps.convertFrom && pageProps.convertFrom.id || "new" }),
     "sales": /* @__PURE__ */ React.createElement(SalesList, { ...ctx }),
     "payments": /* @__PURE__ */ React.createElement(PaymentsPage, { ...ctx, ...pageProps }),
     "new-purchase": /* @__PURE__ */ React.createElement(NewPurchase, { ...ctx, ...pageProps, key: pageProps.editId || "newp" }),
@@ -942,6 +1174,12 @@ function App() {
     "parties": /* @__PURE__ */ React.createElement(PartiesPage, { ...ctx }),
     "party-detail": /* @__PURE__ */ React.createElement(PartyDetail, { ...ctx, ...pageProps, key: pageProps.partyId || "party" }),
     "opening-bills": /* @__PURE__ */ React.createElement(OpeningBillsPage, { ...ctx }),
+    "quotations": /* @__PURE__ */ React.createElement(QuotationsList, { ...ctx }),
+    "new-quotation": /* @__PURE__ */ React.createElement(SalesDocForm, { ...ctx, ...pageProps, docType: "quotation", key: pageProps.editId || pageProps.convertFrom && pageProps.convertFrom.id || "new-quo" }),
+    "sales-orders": /* @__PURE__ */ React.createElement(SalesOrdersList, { ...ctx }),
+    "new-sales-order": /* @__PURE__ */ React.createElement(SalesDocForm, { ...ctx, ...pageProps, docType: "salesOrder", key: pageProps.editId || pageProps.convertFrom && pageProps.convertFrom.id || "new-so" }),
+    "sales-returns": /* @__PURE__ */ React.createElement(SalesReturnsList, { ...ctx }),
+    "new-sales-return": /* @__PURE__ */ React.createElement(NewSalesReturn, { ...ctx, ...pageProps, key: pageProps.invoiceId || "new-sr" }),
     "reports": /* @__PURE__ */ React.createElement(ReportsPage, { ...ctx }),
     "settings": /* @__PURE__ */ React.createElement(SettingsPage, { ...ctx })
   };
@@ -999,16 +1237,17 @@ function Dashboard({ db, derived, go, S }) {
   ].map(([ic, lbl, pg]) => /* @__PURE__ */ React.createElement("button", { key: lbl, onClick: () => go(pg), className: "flex items-center gap-2.5 p-3 rounded-xl border border-zinc-800 hover:border-red-500/50 hover:bg-red-950/40 text-left transition" }, /* @__PURE__ */ React.createElement("span", { className: "text-lg" }, ic), /* @__PURE__ */ React.createElement("span", { className: "text-xs font-semibold text-zinc-300" }, lbl)))), /* @__PURE__ */ React.createElement("div", { className: "mt-4 pt-3 border-t border-zinc-800 text-[11px] text-zinc-500 leading-relaxed" }, /* @__PURE__ */ React.createElement("b", { className: "text-zinc-400" }, "Keyboard shortcuts on billing:"), " Enter = next field \xB7 Enter on Rate = new row \xB7 Ctrl+S = save \xB7 Esc = close popup"))));
 }
 const emptyLine = () => ({ key: uid(), itemId: "", name: "", brand: "", packing: "", packs: "", qty: "", rate: "", cost: 0 });
-function NewSale({ db, derived, actions, go, S, editId }) {
+function NewSale({ db, derived, actions, go, S, editId, convertFrom }) {
   const cur = S.currency;
   const editing = editId ? db.invoices.find((i) => i.id === editId) : null;
   const editLines = editing ? derived.linesByInvoice[editId] || [] : [];
+  const convertLines = convertFrom ? convertFrom.lines.map((l) => ({ key: uid(), itemId: l.itemId, name: l.name, brand: l.brand, packing: l.packing, packs: l.packs, qty: l.qty, rate: l.rate, cost: n2(l.cost) })) : null;
   const [date, setDate] = useState(editing ? String(editing.date).slice(0, 10) : today());
-  const [partyName, setPartyName] = useState(editing ? editing.partyName : "");
-  const [partyId, setPartyId] = useState(editing ? editing.partyId : "");
-  const [lines, setLines] = useState(editing ? editLines.map((l) => ({ key: uid(), itemId: l.itemId, name: l.name, brand: l.brand, packing: l.packing, packs: l.packs, qty: l.qty, rate: l.rate, cost: n2(l.cost) })) : [emptyLine(), emptyLine(), emptyLine()]);
-  const [discount, setDiscount] = useState(editing ? n2(editing.discount) : 0);
-  const [taxOn, setTaxOn] = useState(editing ? n2(editing.taxPct) > 0 : !!S.taxEnabled);
+  const [partyName, setPartyName] = useState(editing ? editing.partyName : convertFrom ? convertFrom.doc.partyName : "");
+  const [partyId, setPartyId] = useState(editing ? editing.partyId : convertFrom ? convertFrom.doc.partyId : "");
+  const [lines, setLines] = useState(editing ? editLines.map((l) => ({ key: uid(), itemId: l.itemId, name: l.name, brand: l.brand, packing: l.packing, packs: l.packs, qty: l.qty, rate: l.rate, cost: n2(l.cost) })) : convertLines || [emptyLine(), emptyLine(), emptyLine()]);
+  const [discount, setDiscount] = useState(editing ? n2(editing.discount) : convertFrom ? n2(convertFrom.doc.discount) : 0);
+  const [taxOn, setTaxOn] = useState(editing ? n2(editing.taxPct) > 0 : convertFrom ? n2(convertFrom.doc.taxPct) > 0 : !!S.taxEnabled);
   const [received, setReceived] = useState("");
   const [payMode, setPayMode] = useState(S.payModes[0] || "Cash");
   const [notes, setNotes] = useState(editing ? editing.notes || "" : "");
@@ -1107,28 +1346,34 @@ function NewSale({ db, derived, actions, go, S, editId }) {
     }
     setSaving(true);
     try {
+      const invoice = {
+        id: editing ? editing.id : "",
+        invNo: editing ? editing.invNo : "",
+        date,
+        partyId,
+        partyName: partyName.trim() || "Cash Sale",
+        subTotal,
+        discount: n2(discount),
+        taxPct,
+        taxAmt,
+        total,
+        payMode,
+        status: "active",
+        notes,
+        createdAt: editing ? editing.createdAt : ""
+      };
+      if (convertFrom) {
+        invoice.sourceType = convertFrom.sheet === "Quotations" ? "Quotation" : "SalesOrder";
+        invoice.sourceId = convertFrom.id;
+      }
       const payload = {
-        invoice: {
-          id: editing ? editing.id : "",
-          invNo: editing ? editing.invNo : "",
-          date,
-          partyId,
-          partyName: partyName.trim() || "Cash Sale",
-          subTotal,
-          discount: n2(discount),
-          taxPct,
-          taxAmt,
-          total,
-          payMode,
-          status: "active",
-          notes,
-          createdAt: editing ? editing.createdAt : ""
-        },
+        invoice,
         items: filled.map((l) => ({ itemId: l.itemId, name: l.name.trim(), brand: l.brand, packing: l.packing, packs: n2(l.packs), qty: n2(l.qty), rate: n2(l.rate), amount: lineAmt(l), cost: n2(l.cost) })),
         payment: !editing && n2(received) > 0 ? { amount: n2(received), mode: payMode } : null,
         _oldLines: editing ? editLines : []
       };
       const res = await actions.saveInvoice(payload);
+      if (convertFrom) await actions.markConverted(convertFrom.sheet, convertFrom.id);
       if (andPrint) printInvoice(res.invoice, res.items, S, derived.partyMap[partyId]);
       if (editing) {
         toast(`Invoice ${res.invoice.invNo} saved \u2713`);
@@ -1166,7 +1411,7 @@ function NewSale({ db, derived, actions, go, S, editId }) {
   });
   const gridCols = "grid grid-cols-[34px_minmax(180px,2fr)_minmax(90px,1fr)_72px_64px_72px_90px_100px_34px] gap-1.5 items-center";
   const cellCls = "w-full px-2 py-1.5 text-[13px] bg-zinc-800 border border-zinc-700 text-zinc-100 rounded-md focus:border-red-500 focus:ring-2 focus:ring-red-500/30 num";
-  return /* @__PURE__ */ React.createElement("div", { className: "anim-in" }, /* @__PURE__ */ React.createElement(PageHead, { title: editing ? `Edit ${editing.invNo}` : "New Sale", sub: "Enter moves to next field \xB7 Ctrl+S saves", right: /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "sm", onClick: () => go("sales") }, "\u2190 Sales List") }), /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800 p-4 mb-3" }, /* @__PURE__ */ React.createElement("div", { className: "grid md:grid-cols-3 gap-3" }, /* @__PURE__ */ React.createElement(Field, { label: "Customer" }, /* @__PURE__ */ React.createElement(
+  return /* @__PURE__ */ React.createElement("div", { className: "anim-in" }, /* @__PURE__ */ React.createElement(PageHead, { title: editing ? `Edit ${editing.invNo}` : convertFrom ? `New Sale (from ${convertFrom.doc[convertFrom.sheet === "Quotations" ? "quoNo" : "soNo"]})` : "New Sale", sub: "Enter moves to next field \xB7 Ctrl+S saves", right: /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "sm", onClick: () => go("sales") }, "\u2190 Sales List") }), /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800 p-4 mb-3" }, /* @__PURE__ */ React.createElement("div", { className: "grid md:grid-cols-3 gap-3" }, /* @__PURE__ */ React.createElement(Field, { label: "Customer" }, /* @__PURE__ */ React.createElement(
     AutoComplete,
     {
       value: partyName,
@@ -1248,13 +1493,78 @@ function SalesList({ db, derived, actions, go, S }) {
 function InvoiceView({ inv, lines, paid, S, derived, go, onClose }) {
   const cur = S.currency;
   const bal = n2(inv.total) - paid;
-  return /* @__PURE__ */ React.createElement(Modal, { title: `Invoice ${inv.invNo}`, onClose, wide: true }, /* @__PURE__ */ React.createElement("div", { className: "flex flex-wrap justify-between gap-3 mb-4" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("div", { className: "font-bold text-zinc-100" }, inv.partyName), /* @__PURE__ */ React.createElement("div", { className: "text-xs text-zinc-500" }, fdate(inv.date), " \xB7 ", inv.payMode)), /* @__PURE__ */ React.createElement("div", { className: "text-right" }, /* @__PURE__ */ React.createElement("div", { className: "text-lg font-extrabold num" }, fmt(inv.total, cur)), /* @__PURE__ */ React.createElement("div", { className: `text-xs font-bold ${bal <= 0.01 ? "text-emerald-400" : "text-amber-400"}` }, bal <= 0.01 ? "FULLY PAID" : `Due ${fmt(bal, cur)}`))), /* @__PURE__ */ React.createElement(Table, { head: ["#", "Item", "Brand", { t: "Packing", right: true }, { t: "Packs", right: true }, { t: "Qty", right: true }, { t: "Rate", right: true }, { t: "Amount", right: true }] }, lines.map((l, i) => /* @__PURE__ */ React.createElement("tr", { key: l.id }, /* @__PURE__ */ React.createElement(Td, null, i + 1), /* @__PURE__ */ React.createElement(Td, { className: "font-medium" }, l.name), /* @__PURE__ */ React.createElement(Td, { className: "text-zinc-400" }, l.brand || "\u2014"), /* @__PURE__ */ React.createElement(Td, { right: true }, l.packing || "\u2014"), /* @__PURE__ */ React.createElement(Td, { right: true }, n2(l.packs) || "\u2014"), /* @__PURE__ */ React.createElement(Td, { right: true, className: "font-semibold" }, fq(l.qty)), /* @__PURE__ */ React.createElement(Td, { right: true }, fmt(l.rate, cur)), /* @__PURE__ */ React.createElement(Td, { right: true, className: "font-bold" }, fmt(l.amount, cur))))), /* @__PURE__ */ React.createElement("div", { className: "mt-3 text-sm space-y-1 max-w-xs ml-auto" }, /* @__PURE__ */ React.createElement("div", { className: "flex justify-between text-zinc-400" }, /* @__PURE__ */ React.createElement("span", null, "Sub total"), /* @__PURE__ */ React.createElement("span", { className: "num" }, fmt(inv.subTotal, cur))), n2(inv.discount) > 0 && /* @__PURE__ */ React.createElement("div", { className: "flex justify-between text-zinc-400" }, /* @__PURE__ */ React.createElement("span", null, "Discount"), /* @__PURE__ */ React.createElement("span", { className: "num" }, "\u2212", fmt(inv.discount, cur))), n2(inv.taxAmt) > 0 && /* @__PURE__ */ React.createElement("div", { className: "flex justify-between text-zinc-400" }, /* @__PURE__ */ React.createElement("span", null, S.taxLabel, " ", inv.taxPct, "%"), /* @__PURE__ */ React.createElement("span", { className: "num" }, fmt(inv.taxAmt, cur))), /* @__PURE__ */ React.createElement("div", { className: "flex justify-between font-extrabold text-zinc-100 border-t border-zinc-800 pt-1" }, /* @__PURE__ */ React.createElement("span", null, "Total"), /* @__PURE__ */ React.createElement("span", { className: "num" }, fmt(inv.total, cur))), /* @__PURE__ */ React.createElement("div", { className: "flex justify-between text-emerald-400" }, /* @__PURE__ */ React.createElement("span", null, "Paid"), /* @__PURE__ */ React.createElement("span", { className: "num" }, fmt(paid, cur)))), /* @__PURE__ */ React.createElement("div", { className: "flex gap-2 justify-end mt-4" }, bal > 0.01 && /* @__PURE__ */ React.createElement(Btn, { kind: "soft", onClick: () => {
+  return /* @__PURE__ */ React.createElement(Modal, { title: `Invoice ${inv.invNo}`, onClose, wide: true }, /* @__PURE__ */ React.createElement("div", { className: "flex flex-wrap justify-between gap-3 mb-4" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("div", { className: "font-bold text-zinc-100" }, inv.partyName), /* @__PURE__ */ React.createElement("div", { className: "text-xs text-zinc-500" }, fdate(inv.date), " \xB7 ", inv.payMode)), /* @__PURE__ */ React.createElement("div", { className: "text-right" }, /* @__PURE__ */ React.createElement("div", { className: "text-lg font-extrabold num" }, fmt(inv.total, cur)), /* @__PURE__ */ React.createElement("div", { className: `text-xs font-bold ${bal <= 0.01 ? "text-emerald-400" : "text-amber-400"}` }, bal <= 0.01 ? "FULLY PAID" : `Due ${fmt(bal, cur)}`))), /* @__PURE__ */ React.createElement(Table, { head: ["#", "Item", "Brand", { t: "Packing", right: true }, { t: "Packs", right: true }, { t: "Qty", right: true }, { t: "Rate", right: true }, { t: "Amount", right: true }] }, lines.map((l, i) => /* @__PURE__ */ React.createElement("tr", { key: l.id }, /* @__PURE__ */ React.createElement(Td, null, i + 1), /* @__PURE__ */ React.createElement(Td, { className: "font-medium" }, l.name), /* @__PURE__ */ React.createElement(Td, { className: "text-zinc-400" }, l.brand || "\u2014"), /* @__PURE__ */ React.createElement(Td, { right: true }, l.packing || "\u2014"), /* @__PURE__ */ React.createElement(Td, { right: true }, n2(l.packs) || "\u2014"), /* @__PURE__ */ React.createElement(Td, { right: true, className: "font-semibold" }, fq(l.qty)), /* @__PURE__ */ React.createElement(Td, { right: true }, fmt(l.rate, cur)), /* @__PURE__ */ React.createElement(Td, { right: true, className: "font-bold" }, fmt(l.amount, cur))))), /* @__PURE__ */ React.createElement("div", { className: "mt-3 text-sm space-y-1 max-w-xs ml-auto" }, /* @__PURE__ */ React.createElement("div", { className: "flex justify-between text-zinc-400" }, /* @__PURE__ */ React.createElement("span", null, "Sub total"), /* @__PURE__ */ React.createElement("span", { className: "num" }, fmt(inv.subTotal, cur))), n2(inv.discount) > 0 && /* @__PURE__ */ React.createElement("div", { className: "flex justify-between text-zinc-400" }, /* @__PURE__ */ React.createElement("span", null, "Discount"), /* @__PURE__ */ React.createElement("span", { className: "num" }, "\u2212", fmt(inv.discount, cur))), n2(inv.taxAmt) > 0 && /* @__PURE__ */ React.createElement("div", { className: "flex justify-between text-zinc-400" }, /* @__PURE__ */ React.createElement("span", null, S.taxLabel, " ", inv.taxPct, "%"), /* @__PURE__ */ React.createElement("span", { className: "num" }, fmt(inv.taxAmt, cur))), /* @__PURE__ */ React.createElement("div", { className: "flex justify-between font-extrabold text-zinc-100 border-t border-zinc-800 pt-1" }, /* @__PURE__ */ React.createElement("span", null, "Total"), /* @__PURE__ */ React.createElement("span", { className: "num" }, fmt(inv.total, cur))), /* @__PURE__ */ React.createElement("div", { className: "flex justify-between text-emerald-400" }, /* @__PURE__ */ React.createElement("span", null, "Paid"), /* @__PURE__ */ React.createElement("span", { className: "num" }, fmt(paid, cur)))), /* @__PURE__ */ React.createElement("div", { className: "flex flex-wrap gap-2 justify-end mt-4" }, bal > 0.01 && /* @__PURE__ */ React.createElement(Btn, { kind: "soft", onClick: () => {
     onClose();
     go("payments", { prefillInvoice: inv });
-  } }, "Collect Payment"), /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", onClick: () => printInvoice(inv, lines, S, derived.partyMap[inv.partyId]) }, "\u{1F5A8} Print"), /* @__PURE__ */ React.createElement(Btn, { onClick: () => {
+  } }, "Collect Payment"), /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", onClick: () => { onClose(); go("new-sales-return", { invoiceId: inv.id }); } }, "\u21A9\uFE0F Sales Return"), /* @__PURE__ */ React.createElement("a", { href: invoiceWhatsAppLink(inv, S, derived.partyMap[inv.partyId]), target: "_blank", rel: "noreferrer", className: "inline-flex items-center justify-center gap-1.5 rounded-lg font-semibold transition-colors px-4 py-2 text-sm bg-zinc-900 border border-zinc-700 text-zinc-200 hover:bg-zinc-800" }, "\u{1F4AC} WhatsApp"), /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", onClick: () => downloadInvoicePdf(inv, lines, S, derived.partyMap[inv.partyId]) }, "\u2B07\uFE0F PDF"), /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", onClick: () => printInvoice(inv, lines, S, derived.partyMap[inv.partyId]) }, "\u{1F5A8} Print"), /* @__PURE__ */ React.createElement(Btn, { onClick: () => {
     onClose();
     go("new-sale", { editId: inv.id });
   } }, "Edit")));
+}
+/**
+ * Sales Return against an existing invoice (Module 4). Partial-line returns are the
+ * normal case, so each line caps at (originally invoiced qty − already returned qty)
+ * rather than a flat "return everything" toggle. Kept deliberately simple: a straight
+ * qty*rate refund per line, no re-derivation of the original invoice's discount/tax
+ * split — small businesses handle returns this way in practice, and the receivable
+ * reduction (via a Payments-sheet credit, see apiSaveSalesReturn) is what actually
+ * needs to be exact, not a proportional tax allocation nobody will check.
+ */
+function NewSalesReturn({ db, derived, actions, go, S, invoiceId }) {
+  const cur = S.currency;
+  const inv = db.invoices.find((i) => i.id === invoiceId);
+  const invLines = derived.linesByInvoice[invoiceId] || [];
+  const [qtys, setQtys] = useState({});
+  const [notes, setNotes] = useState("");
+  const [saving, setSaving] = useState(false);
+  if (!inv) {
+    return /* @__PURE__ */ React.createElement("div", { className: "anim-in" }, /* @__PURE__ */ React.createElement(PageHead, { title: "Invoice not found", right: /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "sm", onClick: () => go("sales") }, "← Sales List") }));
+  }
+  const rows = invLines.map((l) => {
+    const returned = derived.returnedQtyByInvoiceItem[l.id] || 0;
+    const remaining = Math.max(0, n2(l.qty) - returned);
+    const retQty = n2(qtys[l.id] || 0);
+    return { ...l, returned, remaining, retQty, amount: retQty * n2(l.rate) };
+  });
+  const total = rows.reduce((s, r) => s + r.amount, 0);
+  const setQty = (lineId, v, max) => {
+    const capped = v === "" ? "" : String(Math.min(Math.max(n2(v), 0), max));
+    setQtys((q) => ({ ...q, [lineId]: capped }));
+  };
+  const save = async () => {
+    const items = rows.filter((r) => r.retQty > 0).map((r) => ({ invoiceItemId: r.id, itemId: r.itemId, name: r.name, brand: r.brand, packing: r.packing, qty: r.retQty, rate: n2(r.rate), amount: r.amount }));
+    if (!items.length) {
+      toast("Enter a return quantity for at least one line", "warn");
+      return;
+    }
+    setSaving(true);
+    try {
+      await actions.saveSalesReturn({
+        salesReturn: { id: "", date: today(), partyId: inv.partyId, partyName: inv.partyName, subTotal: total, taxAmt: 0, total, notes, sourceType: "Invoice", sourceId: inv.id },
+        items
+      });
+      go("sales-returns");
+    } catch (e) {
+      toast("Save failed: " + (e.message || e), "err");
+    }
+    setSaving(false);
+  };
+  return /* @__PURE__ */ React.createElement("div", { className: "anim-in" }, /* @__PURE__ */ React.createElement(PageHead, { title: `Sales Return — ${inv.invNo}`, sub: `${inv.partyName} \xB7 ${fdate(inv.date)}`, right: /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "sm", onClick: () => go("sales") }, "← Sales List") }), /* @__PURE__ */ React.createElement(Table, { head: ["Item", { t: "Invoiced", right: true }, { t: "Returned", right: true }, { t: "Returnable", right: true }, { t: "Return Qty", right: true }, { t: "Amount", right: true }] }, rows.map((r) => /* @__PURE__ */ React.createElement("tr", { key: r.id }, /* @__PURE__ */ React.createElement(Td, { className: "font-medium" }, r.name, r.brand && /* @__PURE__ */ React.createElement("span", { className: "text-zinc-500" }, " (", r.brand, ")")), /* @__PURE__ */ React.createElement(Td, { right: true }, fq(r.qty)), /* @__PURE__ */ React.createElement(Td, { right: true, className: "text-zinc-500" }, r.returned > 0 ? fq(r.returned) : "—"), /* @__PURE__ */ React.createElement(Td, { right: true, className: r.remaining <= 0 ? "text-zinc-600" : "text-emerald-400" }, fq(r.remaining)), /* @__PURE__ */ React.createElement(Td, { right: true }, /* @__PURE__ */ React.createElement("input", { value: qtys[r.id] ?? "", onChange: (e) => setQty(r.id, e.target.value, r.remaining), disabled: r.remaining <= 0, inputMode: "decimal", className: "w-20 px-2 py-1 text-right text-sm bg-zinc-800 border border-zinc-700 text-zinc-100 rounded-md focus:border-red-500 focus:ring-2 focus:ring-red-500/30 num disabled:opacity-40", placeholder: "0" })), /* @__PURE__ */ React.createElement(Td, { right: true, className: "font-bold" }, r.amount > 0 ? fmt(r.amount, cur) : "—")))), /* @__PURE__ */ React.createElement("div", { className: "max-w-sm ml-auto bg-zinc-900 rounded-xl border border-zinc-800 p-4 mt-4" }, /* @__PURE__ */ React.createElement(Field, { label: "Notes" }, /* @__PURE__ */ React.createElement(Input, { value: notes, onChange: (e) => setNotes(e.target.value), placeholder: "Reason for return…" })), /* @__PURE__ */ React.createElement("div", { className: "flex justify-between text-base py-2 mt-3 border-t border-zinc-800 font-extrabold text-zinc-100" }, /* @__PURE__ */ React.createElement("span", null, "REFUND TOTAL"), /* @__PURE__ */ React.createElement("span", { className: "num" }, fmt(total, cur))), /* @__PURE__ */ React.createElement(Btn, { kind: "brand", className: "w-full mt-2", disabled: saving || total <= 0, onClick: save }, saving ? "Saving…" : "Save Sales Return")));
+}
+function SalesReturnsList({ db, derived, actions, go, S }) {
+  const cur = S.currency;
+  const [q, setQ] = useState("");
+  const [confirm, setConfirm] = useState(null);
+  const [view, setView] = useState(null);
+  const rows = useMemo(() => {
+    let list = [...db.salesReturns].sort((a, b) => String(b.createdAt || b.date).localeCompare(String(a.createdAt || a.date)));
+    if (q.trim()) {
+      const s = clamp(q);
+      list = list.filter((r) => clamp(r.partyName).includes(s) || clamp(r.srNo).includes(s));
+    }
+    return list;
+  }, [db.salesReturns, q]);
+  return /* @__PURE__ */ React.createElement("div", { className: "anim-in" }, /* @__PURE__ */ React.createElement(PageHead, { title: "Sales Returns", sub: `${rows.length} returns \xB7 Started from an invoice's "Sales Return" button` }), /* @__PURE__ */ React.createElement(Input, { value: q, onChange: (e) => setQ(e.target.value), placeholder: "🔍 Search party / return no…", className: "!w-64 mb-3" }), rows.length === 0 ? /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800" }, /* @__PURE__ */ React.createElement(Empty, { icon: "↩️", msg: "No sales returns yet. Open an invoice and click “Sales Return”." })) : /* @__PURE__ */ React.createElement(Table, { head: ["Return", "Date", "Party", { t: "Total", right: true }, ""] }, rows.map((r) => /* @__PURE__ */ React.createElement("tr", { key: r.id, className: "hover:bg-zinc-800/60 cursor-pointer", onClick: () => setView(r) }, /* @__PURE__ */ React.createElement(Td, { className: "font-semibold" }, r.srNo), /* @__PURE__ */ React.createElement(Td, { className: "text-zinc-400 whitespace-nowrap" }, fdate(r.date)), /* @__PURE__ */ React.createElement(Td, null, r.partyName), /* @__PURE__ */ React.createElement(Td, { right: true, className: "font-bold" }, fmt(r.total, cur)), /* @__PURE__ */ React.createElement(Td, { onClick: (e) => e.stopPropagation() }, /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "xs", className: "!text-red-400", onClick: () => setConfirm(r) }, "\u{1F5D1}"))))), view && /* @__PURE__ */ React.createElement(Modal, { title: `Sales Return ${view.srNo}`, onClose: () => setView(null), wide: true }, /* @__PURE__ */ React.createElement("div", { className: "mb-3" }, /* @__PURE__ */ React.createElement("b", null, view.partyName), " ", /* @__PURE__ */ React.createElement("span", { className: "text-xs text-zinc-500" }, "\xB7 ", fdate(view.date))), /* @__PURE__ */ React.createElement(Table, { head: ["#", "Item", { t: "Qty", right: true }, { t: "Rate", right: true }, { t: "Amount", right: true }] }, (derived.linesBySalesReturn[view.id] || []).map((l, i) => /* @__PURE__ */ React.createElement("tr", { key: l.id }, /* @__PURE__ */ React.createElement(Td, null, i + 1), /* @__PURE__ */ React.createElement(Td, { className: "font-medium" }, l.name), /* @__PURE__ */ React.createElement(Td, { right: true }, fq(l.qty)), /* @__PURE__ */ React.createElement(Td, { right: true }, fmt(l.rate, cur)), /* @__PURE__ */ React.createElement(Td, { right: true, className: "font-bold" }, fmt(l.amount, cur))))), /* @__PURE__ */ React.createElement("div", { className: "text-right mt-3 font-extrabold" }, "Refund total: ", /* @__PURE__ */ React.createElement("span", { className: "num" }, fmt(view.total, cur)))), confirm && /* @__PURE__ */ React.createElement(Confirm, { msg: `Delete return ${confirm.srNo}? Stock will be reversed and the customer's balance will go back up.`, onYes: () => actions.deleteSalesReturn(confirm.id), onClose: () => setConfirm(null) }));
 }
 const emptyPLine = () => ({ key: uid(), itemId: "", name: "", qty: "", rate: "" });
 function NewPurchase({ db, derived, actions, go, S, editId }) {
@@ -1408,6 +1718,167 @@ function PurchaseList({ db, derived, actions, go, S }) {
     const bal = n2(p.total) - paid;
     return /* @__PURE__ */ React.createElement("tr", { key: p.id, className: "hover:bg-zinc-800/60 cursor-pointer", onClick: () => setView(p) }, /* @__PURE__ */ React.createElement(Td, { className: "font-semibold" }, p.billNo), /* @__PURE__ */ React.createElement(Td, { className: "text-zinc-400 whitespace-nowrap" }, fdate(p.date)), /* @__PURE__ */ React.createElement(Td, null, p.partyName), /* @__PURE__ */ React.createElement(Td, { right: true, className: "font-bold" }, fmt(p.total, cur)), /* @__PURE__ */ React.createElement(Td, { right: true, className: "text-emerald-400" }, fmt(paid, cur)), /* @__PURE__ */ React.createElement(Td, { right: true, className: bal > 0.01 ? "text-red-400 font-semibold" : "text-zinc-600" }, bal > 0.01 ? fmt(bal, cur) : "\u2014"), /* @__PURE__ */ React.createElement(Td, { onClick: (e) => e.stopPropagation() }, /* @__PURE__ */ React.createElement("div", { className: "flex gap-1 justify-end" }, /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "xs", onClick: () => go("new-purchase", { editId: p.id }) }, "\u270E"), /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "xs", className: "!text-red-400", onClick: () => setConfirm(p) }, "\u{1F5D1}"))));
   })), view && /* @__PURE__ */ React.createElement(Modal, { title: `Purchase ${view.billNo}`, onClose: () => setView(null), wide: true }, /* @__PURE__ */ React.createElement("div", { className: "mb-3" }, /* @__PURE__ */ React.createElement("b", null, view.partyName), " ", /* @__PURE__ */ React.createElement("span", { className: "text-xs text-zinc-500" }, "\xB7 ", fdate(view.date))), /* @__PURE__ */ React.createElement(Table, { head: ["#", "Item", { t: "Qty", right: true }, { t: "Rate", right: true }, { t: "Amount", right: true }] }, (derived.linesByPurchase[view.id] || []).map((l, i) => /* @__PURE__ */ React.createElement("tr", { key: l.id }, /* @__PURE__ */ React.createElement(Td, null, i + 1), /* @__PURE__ */ React.createElement(Td, { className: "font-medium" }, l.name), /* @__PURE__ */ React.createElement(Td, { right: true }, fq(l.qty)), /* @__PURE__ */ React.createElement(Td, { right: true }, fmt(l.rate, cur)), /* @__PURE__ */ React.createElement(Td, { right: true, className: "font-bold" }, fmt(l.amount, cur))))), /* @__PURE__ */ React.createElement("div", { className: "text-right mt-3 font-extrabold" }, "Total: ", /* @__PURE__ */ React.createElement("span", { className: "num" }, fmt(view.total, cur)))), confirm && /* @__PURE__ */ React.createElement(Confirm, { msg: `Delete purchase ${confirm.billNo}? Stock will be reversed.`, onYes: () => actions.deletePurchase(confirm.id), onClose: () => setConfirm(null) }));
+}
+/**
+ * Shared entry form for Quotations and Sales Orders (Module 4). The two are
+ * structurally identical — party, dated line-item grid, discount/tax, total — the
+ * only real differences are which sheet they save to and what happens next, so one
+ * component driven by a small `docType` switch beats maintaining two near-duplicate
+ * 300-line forms that would slowly drift apart. Neither touches stock: that only
+ * happens once goods actually leave, at Invoice save, same rule as every other module.
+ * `convertFrom` (optional): `{ sheet: 'Quotations', id, doc, lines }` — when set, this
+ * is a one-click conversion from an earlier document. Its lines/party pre-fill the
+ * form, and on save the source document is marked 'Converted' (never deleted).
+ */
+function SalesDocForm({ db, derived, actions, go, S, docType, editId, convertFrom }) {
+  const cur = S.currency;
+  const isQuo = docType === "quotation";
+  const list = isQuo ? db.quotations : db.salesOrders;
+  const linesBy = isQuo ? derived.linesByQuotation : derived.linesBySalesOrder;
+  const noField = isQuo ? "quoNo" : "soNo";
+  const docKey = isQuo ? "quotation" : "salesOrder";
+  const label = isQuo ? "Quotation" : "Sales Order";
+  const listPage = isQuo ? "quotations" : "sales-orders";
+  const saveAction = isQuo ? actions.saveQuotation : actions.saveSalesOrder;
+
+  const editing = editId ? list.find((d) => d.id === editId) : null;
+  const editLines = editing ? linesBy[editId] || [] : [];
+  const convertLines = convertFrom ? convertFrom.lines.map((l) => ({ key: uid(), itemId: l.itemId, name: l.name, brand: l.brand, packing: l.packing, packs: l.packs, qty: l.qty, rate: l.rate, cost: n2(l.cost) })) : null;
+
+  const [date, setDate] = useState(editing ? String(editing.date).slice(0, 10) : today());
+  const [partyName, setPartyName] = useState(editing ? editing.partyName : convertFrom ? convertFrom.doc.partyName : "");
+  const [partyId, setPartyId] = useState(editing ? editing.partyId : convertFrom ? convertFrom.doc.partyId : "");
+  const [lines, setLines] = useState(editing ? editLines.map((l) => ({ key: uid(), itemId: l.itemId, name: l.name, brand: l.brand, packing: l.packing, packs: l.packs, qty: l.qty, rate: l.rate, cost: n2(l.cost) })) : convertLines || [emptyLine(), emptyLine(), emptyLine()]);
+  const [discount, setDiscount] = useState(editing ? n2(editing.discount) : convertFrom ? n2(convertFrom.doc.discount) : 0);
+  const [taxOn, setTaxOn] = useState(editing ? n2(editing.taxPct) > 0 : convertFrom ? n2(convertFrom.doc.taxPct) > 0 : !!S.taxEnabled);
+  const [notes, setNotes] = useState(editing ? editing.notes || "" : "");
+  const [saving, setSaving] = useState(false);
+  const flow = ["name", "brand", "packing", "packs", "qty", "rate"];
+  const { setCellRef, focusCell, onCellKey, onArrow } = useGridNav(flow);
+  const itemOptions = useMemo(() => db.items.filter((i) => i.active !== false).map((i) => ({ id: i.id, label: i.name, sub: i.brand, item: i })), [db.items]);
+  const partyOptions = useMemo(() => db.parties.filter((p) => p.type !== "Supplier").map((p) => ({ id: p.id, label: p.name, sub: p.phone })), [db.parties]);
+  const update = (key, patch) => setLines((ls) => ls.map((l) => l.key === key ? { ...l, ...patch } : l));
+  const removeLine = (key) => setLines((ls) => ls.length > 1 ? ls.filter((l) => l.key !== key) : ls);
+  const addLine = () => {
+    const nl = emptyLine();
+    setLines((ls) => [...ls, nl]);
+    return nl.key;
+  };
+  const lineAmt = (l) => n2(l.qty) * n2(l.rate);
+  const filled = lines.filter((l) => l.name.trim() && n2(l.qty) > 0);
+  const subTotal = filled.reduce((s, l) => s + lineAmt(l), 0);
+  const taxPct = taxOn ? n2(S.taxPct) : 0;
+  const taxable = Math.max(0, subTotal - n2(discount));
+  const taxAmt = taxable * taxPct / 100;
+  const total = taxable + taxAmt;
+  const pickItem = (key, o) => {
+    const it = o.item;
+    update(key, { itemId: it.id, name: it.name, brand: it.brand || "", packing: it.packSize || "", cost: n2(it.purchaseRate), rate: n2(it.saleRate) || "" });
+    focusCell(key, "packs");
+  };
+  const quickCreateItem = async (key, name) => {
+    const rec = await actions.saveItem({ name, brand: "", category: "", unit: S.units[0] || "Pcs", packSize: "", saleRate: 0, purchaseRate: 0, stock: 0, minStock: 0, active: true });
+    update(key, { itemId: rec.id, name: rec.name });
+    focusCell(key, "brand");
+  };
+  const pickParty = (o) => {
+    setPartyId(o.id);
+    setPartyName(o.label);
+  };
+  const quickCreateParty = async (name) => {
+    const rec = await actions.saveParty({ name, type: "Customer", phone: "", address: "", gstin: "", openingBalance: 0, notes: "" });
+    setPartyId(rec.id);
+    setPartyName(rec.name);
+  };
+  const setPacking = (key, v) => {
+    const l = lines.find((x) => x.key === key);
+    const packs = n2(l.packs);
+    update(key, { packing: v, qty: n2(v) > 0 && packs > 0 ? n2(v) * packs : l.qty });
+  };
+  const setPacks = (key, v) => {
+    const l = lines.find((x) => x.key === key);
+    const pk = n2(l.packing);
+    update(key, { packs: v, qty: pk > 0 && n2(v) > 0 ? pk * n2(v) : l.qty });
+  };
+  const save = async () => {
+    if (!filled.length) {
+      toast("Add at least one item with quantity", "warn");
+      return;
+    }
+    setSaving(true);
+    try {
+      const doc = {
+        id: editing ? editing.id : "",
+        [noField]: editing ? editing[noField] : "",
+        date, partyId, partyName: partyName.trim() || "Cash Sale",
+        subTotal, discount: n2(discount), taxPct, taxAmt, total,
+        status: editing ? editing.status : "Open",
+        notes, createdAt: editing ? editing.createdAt : ""
+      };
+      if (convertFrom) {
+        doc.sourceType = convertFrom.sheet === "Quotations" ? "Quotation" : "SalesOrder";
+        doc.sourceId = convertFrom.id;
+      }
+      const payload = { [docKey]: doc, items: filled.map((l) => ({ itemId: l.itemId, name: l.name.trim(), brand: l.brand, packing: l.packing, packs: n2(l.packs), qty: n2(l.qty), rate: n2(l.rate), amount: lineAmt(l), cost: n2(l.cost) })) };
+      await saveAction(payload);
+      if (convertFrom) await actions.markConverted(convertFrom.sheet, convertFrom.id);
+      go(listPage);
+    } catch (e) {
+      toast("Save failed: " + (e.message || e), "err");
+    }
+    setSaving(false);
+  };
+  const gridCols = "grid grid-cols-[34px_minmax(180px,2fr)_minmax(90px,1fr)_72px_64px_72px_90px_100px_34px] gap-1.5 items-center";
+  const cellCls = "w-full px-2 py-1.5 text-[13px] bg-zinc-800 border border-zinc-700 text-zinc-100 rounded-md focus:border-red-500 focus:ring-2 focus:ring-red-500/30 num";
+  return /* @__PURE__ */ React.createElement("div", { className: "anim-in" }, /* @__PURE__ */ React.createElement(PageHead, { title: editing ? `Edit ${editing[noField]}` : convertFrom ? `New ${label} (from ${convertFrom.doc[convertFrom.sheet === "Quotations" ? "quoNo" : "soNo"]})` : `New ${label}`, sub: "Enter moves to next field", right: /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "sm", onClick: () => go(listPage) }, `← ${label} List`) }), /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800 p-4 mb-3 grid md:grid-cols-3 gap-3" }, /* @__PURE__ */ React.createElement(Field, { label: "Customer" }, /* @__PURE__ */ React.createElement(AutoComplete, { value: partyName, onChange: (v) => { setPartyName(v); setPartyId(""); }, options: partyOptions, onPick: pickParty, allowCreate: true, onCreate: quickCreateParty, placeholder: "Search or add customer…" })), /* @__PURE__ */ React.createElement(Field, { label: "Date" }, /* @__PURE__ */ React.createElement(Input, { type: "date", value: date, onChange: (e) => setDate(e.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Notes" }, /* @__PURE__ */ React.createElement(Input, { value: notes, onChange: (e) => setNotes(e.target.value), placeholder: "Optional…" }))), /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800 p-4 mb-3 overflow-x-auto" }, /* @__PURE__ */ React.createElement("div", { className: "min-w-[760px]" }, /* @__PURE__ */ React.createElement("div", { className: `${gridCols} pb-2 border-b border-zinc-800 mb-2 text-[10px] font-bold uppercase tracking-wide text-zinc-500` }, /* @__PURE__ */ React.createElement("div", null, "Sr"), /* @__PURE__ */ React.createElement("div", null, "Item Description"), /* @__PURE__ */ React.createElement("div", null, "Brand"), /* @__PURE__ */ React.createElement("div", { className: "text-center" }, "Packing"), /* @__PURE__ */ React.createElement("div", { className: "text-center" }, "Packs"), /* @__PURE__ */ React.createElement("div", { className: "text-center" }, "Qty"), /* @__PURE__ */ React.createElement("div", { className: "text-right" }, "Rate"), /* @__PURE__ */ React.createElement("div", { className: "text-right" }, "Amount"), /* @__PURE__ */ React.createElement("div", null)), lines.map((l, idx) => /* @__PURE__ */ React.createElement("div", { key: l.key, className: gridCols }, /* @__PURE__ */ React.createElement("div", { className: "text-xs text-zinc-500 num text-center" }, idx + 1), /* @__PURE__ */ React.createElement(
+    AutoComplete,
+    {
+      value: l.name,
+      onChange: (v) => update(l.key, { name: v, itemId: "" }),
+      options: itemOptions,
+      onPick: (o) => pickItem(l.key, o),
+      allowCreate: true,
+      onCreate: (name) => quickCreateItem(l.key, name),
+      className: cellCls + " !text-left",
+      inputRef: setCellRef(l.key, "name"),
+      onEnterEmpty: (e) => onCellKey(e, l.key, "name", lines, addLine),
+      onArrow: onArrow(l.key, "name", lines),
+      placeholder: "Type item name…"
+    }
+  ), /* @__PURE__ */ React.createElement("input", { ref: setCellRef(l.key, "brand"), value: l.brand, onChange: (e) => update(l.key, { brand: e.target.value }), onKeyDown: (e) => onCellKey(e, l.key, "brand", lines, addLine), className: cellCls + " !text-left", placeholder: "Brand" }), /* @__PURE__ */ React.createElement("input", { ref: setCellRef(l.key, "packing"), value: l.packing, onChange: (e) => setPacking(l.key, e.target.value), onKeyDown: (e) => onCellKey(e, l.key, "packing", lines, addLine), className: cellCls + " text-center", placeholder: "Pack", inputMode: "decimal" }), /* @__PURE__ */ React.createElement("input", { ref: setCellRef(l.key, "packs"), value: l.packs, onChange: (e) => setPacks(l.key, e.target.value), onKeyDown: (e) => onCellKey(e, l.key, "packs", lines, addLine), className: cellCls + " text-center", placeholder: "0", inputMode: "decimal" }), /* @__PURE__ */ React.createElement("input", { ref: setCellRef(l.key, "qty"), value: l.qty, onChange: (e) => update(l.key, { qty: e.target.value }), onKeyDown: (e) => onCellKey(e, l.key, "qty", lines, addLine), className: cellCls + " text-center font-semibold", placeholder: "0", inputMode: "decimal" }), /* @__PURE__ */ React.createElement("input", { ref: setCellRef(l.key, "rate"), value: l.rate, onChange: (e) => update(l.key, { rate: e.target.value }), onKeyDown: (e) => onCellKey(e, l.key, "rate", lines, addLine), className: cellCls + " text-right", placeholder: "0.00", inputMode: "decimal" }), /* @__PURE__ */ React.createElement("div", { className: "text-right text-[13px] font-bold num pr-1" }, lineAmt(l) > 0 ? fq(lineAmt(l)) : "—"), /* @__PURE__ */ React.createElement("button", { tabIndex: -1, onClick: () => removeLine(l.key), className: "w-7 h-7 rounded-md text-red-400 hover:bg-red-950/40 text-sm" }, "✕"))), /* @__PURE__ */ React.createElement(Btn, { kind: "soft", size: "sm", className: "mt-2", onClick: () => {
+    const k = addLine();
+    focusCell(k, "name");
+  } }, "+ Add row"))), /* @__PURE__ */ React.createElement("div", { className: "max-w-sm ml-auto bg-zinc-900 rounded-xl border border-zinc-800 p-4" }, /* @__PURE__ */ React.createElement("div", { className: "flex justify-between text-sm py-1 text-zinc-400" }, /* @__PURE__ */ React.createElement("span", null, "Sub total"), /* @__PURE__ */ React.createElement("b", { className: "num" }, fmt(subTotal, cur))), /* @__PURE__ */ React.createElement("div", { className: "flex justify-between items-center text-sm py-1 text-zinc-400" }, /* @__PURE__ */ React.createElement("span", null, "Discount"), /* @__PURE__ */ React.createElement("input", { value: discount, onChange: (e) => setDiscount(e.target.value), className: "w-24 px-2 py-1 text-right text-sm bg-zinc-800 border border-zinc-700 text-zinc-100 rounded-md focus:border-red-500 focus:ring-2 focus:ring-red-500/30 num", inputMode: "decimal" })), /* @__PURE__ */ React.createElement("div", { className: "flex justify-between items-center text-sm py-1 text-zinc-400" }, /* @__PURE__ */ React.createElement("label", { className: "flex items-center gap-1.5 cursor-pointer" }, /* @__PURE__ */ React.createElement("input", { type: "checkbox", checked: taxOn, onChange: (e) => setTaxOn(e.target.checked) }), " ", S.taxLabel, " ", S.taxPct, "%"), /* @__PURE__ */ React.createElement("b", { className: "num" }, fmt(taxAmt, cur))), /* @__PURE__ */ React.createElement("div", { className: "flex justify-between text-base py-2 mt-1 border-t border-zinc-800 font-extrabold text-zinc-100" }, /* @__PURE__ */ React.createElement("span", null, "TOTAL"), /* @__PURE__ */ React.createElement("span", { className: "num" }, fmt(total, cur))), /* @__PURE__ */ React.createElement(Btn, { kind: "brand", className: "w-full mt-3", disabled: saving, onClick: save }, saving ? "Saving…" : editing ? `Update ${label}` : `Save ${label}`)));
+}
+function QuotationsList({ db, derived, actions, go, S }) {
+  const cur = S.currency;
+  const [q, setQ] = useState("");
+  const [confirm, setConfirm] = useState(null);
+  const [view, setView] = useState(null);
+  const rows = useMemo(() => {
+    let list = [...db.quotations].sort((a, b) => String(b.createdAt || b.date).localeCompare(String(a.createdAt || a.date)));
+    if (q.trim()) {
+      const s = clamp(q);
+      list = list.filter((d) => clamp(d.partyName).includes(s) || clamp(d.quoNo).includes(s));
+    }
+    return list;
+  }, [db.quotations, q]);
+  return /* @__PURE__ */ React.createElement("div", { className: "anim-in" }, /* @__PURE__ */ React.createElement(PageHead, { title: "Quotations", sub: `${rows.length} quotations`, right: /* @__PURE__ */ React.createElement(Btn, { kind: "brand", onClick: () => go("new-quotation") }, "+ New Quotation") }), /* @__PURE__ */ React.createElement(Input, { value: q, onChange: (e) => setQ(e.target.value), placeholder: "🔍 Search party / quotation no…", className: "!w-64 mb-3" }), rows.length === 0 ? /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800" }, /* @__PURE__ */ React.createElement(Empty, { icon: "\u{1F4C4}", msg: "No quotations yet.", action: /* @__PURE__ */ React.createElement(Btn, { kind: "brand", size: "sm", onClick: () => go("new-quotation") }, "New Quotation") })) : /* @__PURE__ */ React.createElement(Table, { head: ["Quotation", "Date", "Party", { t: "Total", right: true }, "Status", ""] }, rows.map((quo) => /* @__PURE__ */ React.createElement("tr", { key: quo.id, className: "hover:bg-zinc-800/60 cursor-pointer", onClick: () => setView(quo) }, /* @__PURE__ */ React.createElement(Td, { className: "font-semibold" }, quo.quoNo), /* @__PURE__ */ React.createElement(Td, { className: "text-zinc-400 whitespace-nowrap" }, fdate(quo.date)), /* @__PURE__ */ React.createElement(Td, null, quo.partyName), /* @__PURE__ */ React.createElement(Td, { right: true, className: "font-bold" }, fmt(quo.total, cur)), /* @__PURE__ */ React.createElement(Td, null, /* @__PURE__ */ React.createElement("span", { className: `px-2 py-0.5 rounded-full text-[10px] font-bold ${quo.status === "Converted" ? "bg-emerald-950/50 text-emerald-400" : "bg-blue-950/50 text-blue-400"}` }, quo.status)), /* @__PURE__ */ React.createElement(Td, { onClick: (e) => e.stopPropagation() }, /* @__PURE__ */ React.createElement("div", { className: "flex gap-1 justify-end" }, quo.status !== "Converted" && /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "xs", onClick: () => go("new-sales-order", { convertFrom: { sheet: "Quotations", id: quo.id, doc: quo, lines: derived.linesByQuotation[quo.id] || [] } }) }, "→ SO"), /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "xs", onClick: () => go("new-sale", { convertFrom: { sheet: "Quotations", id: quo.id, doc: quo, lines: derived.linesByQuotation[quo.id] || [] } }) }, "→ Invoice"), /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "xs", onClick: () => go("new-quotation", { editId: quo.id }) }, "✎")), /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "xs", className: "!text-red-400", onClick: () => setConfirm(quo) }, "\u{1F5D1}")))))), view && /* @__PURE__ */ React.createElement(Modal, { title: `Quotation ${view.quoNo}`, onClose: () => setView(null), wide: true }, /* @__PURE__ */ React.createElement("div", { className: "mb-3" }, /* @__PURE__ */ React.createElement("b", null, view.partyName), " ", /* @__PURE__ */ React.createElement("span", { className: "text-xs text-zinc-500" }, "\xB7 ", fdate(view.date))), /* @__PURE__ */ React.createElement(Table, { head: ["#", "Item", { t: "Qty", right: true }, { t: "Rate", right: true }, { t: "Amount", right: true }] }, (derived.linesByQuotation[view.id] || []).map((l, i) => /* @__PURE__ */ React.createElement("tr", { key: l.id }, /* @__PURE__ */ React.createElement(Td, null, i + 1), /* @__PURE__ */ React.createElement(Td, { className: "font-medium" }, l.name), /* @__PURE__ */ React.createElement(Td, { right: true }, fq(l.qty)), /* @__PURE__ */ React.createElement(Td, { right: true }, fmt(l.rate, cur)), /* @__PURE__ */ React.createElement(Td, { right: true, className: "font-bold" }, fmt(l.amount, cur))))), /* @__PURE__ */ React.createElement("div", { className: "text-right mt-3 font-extrabold" }, "Total: ", /* @__PURE__ */ React.createElement("span", { className: "num" }, fmt(view.total, cur)))), confirm && /* @__PURE__ */ React.createElement(Confirm, { msg: `Delete quotation ${confirm.quoNo}?`, onYes: () => actions.deleteQuotation(confirm.id), onClose: () => setConfirm(null) }));
+}
+function SalesOrdersList({ db, derived, actions, go, S }) {
+  const cur = S.currency;
+  const [q, setQ] = useState("");
+  const [confirm, setConfirm] = useState(null);
+  const [view, setView] = useState(null);
+  const rows = useMemo(() => {
+    let list = [...db.salesOrders].sort((a, b) => String(b.createdAt || b.date).localeCompare(String(a.createdAt || a.date)));
+    if (q.trim()) {
+      const s = clamp(q);
+      list = list.filter((d) => clamp(d.partyName).includes(s) || clamp(d.soNo).includes(s));
+    }
+    return list;
+  }, [db.salesOrders, q]);
+  return /* @__PURE__ */ React.createElement("div", { className: "anim-in" }, /* @__PURE__ */ React.createElement(PageHead, { title: "Sales Orders", sub: `${rows.length} orders`, right: /* @__PURE__ */ React.createElement(Btn, { kind: "brand", onClick: () => go("new-sales-order") }, "+ New Sales Order") }), /* @__PURE__ */ React.createElement(Input, { value: q, onChange: (e) => setQ(e.target.value), placeholder: "🔍 Search party / SO no…", className: "!w-64 mb-3" }), rows.length === 0 ? /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800" }, /* @__PURE__ */ React.createElement(Empty, { icon: "\u{1F4DD}", msg: "No sales orders yet.", action: /* @__PURE__ */ React.createElement(Btn, { kind: "brand", size: "sm", onClick: () => go("new-sales-order") }, "New Sales Order") })) : /* @__PURE__ */ React.createElement(Table, { head: ["Sales Order", "Date", "Party", { t: "Total", right: true }, "Status", ""] }, rows.map((so) => /* @__PURE__ */ React.createElement("tr", { key: so.id, className: "hover:bg-zinc-800/60 cursor-pointer", onClick: () => setView(so) }, /* @__PURE__ */ React.createElement(Td, { className: "font-semibold" }, so.soNo), /* @__PURE__ */ React.createElement(Td, { className: "text-zinc-400 whitespace-nowrap" }, fdate(so.date)), /* @__PURE__ */ React.createElement(Td, null, so.partyName), /* @__PURE__ */ React.createElement(Td, { right: true, className: "font-bold" }, fmt(so.total, cur)), /* @__PURE__ */ React.createElement(Td, null, /* @__PURE__ */ React.createElement("span", { className: `px-2 py-0.5 rounded-full text-[10px] font-bold ${so.status === "Converted" ? "bg-emerald-950/50 text-emerald-400" : "bg-blue-950/50 text-blue-400"}` }, so.status)), /* @__PURE__ */ React.createElement(Td, { onClick: (e) => e.stopPropagation() }, /* @__PURE__ */ React.createElement("div", { className: "flex gap-1 justify-end" }, so.status !== "Converted" && /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "xs", onClick: () => go("new-sale", { convertFrom: { sheet: "SalesOrders", id: so.id, doc: so, lines: derived.linesBySalesOrder[so.id] || [] } }) }, "→ Invoice"), /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "xs", onClick: () => go("new-sales-order", { editId: so.id }) }, "✎")), /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "xs", className: "!text-red-400", onClick: () => setConfirm(so) }, "\u{1F5D1}")))))), view && /* @__PURE__ */ React.createElement(Modal, { title: `Sales Order ${view.soNo}`, onClose: () => setView(null), wide: true }, /* @__PURE__ */ React.createElement("div", { className: "mb-3" }, /* @__PURE__ */ React.createElement("b", null, view.partyName), " ", /* @__PURE__ */ React.createElement("span", { className: "text-xs text-zinc-500" }, "\xB7 ", fdate(view.date))), /* @__PURE__ */ React.createElement(Table, { head: ["#", "Item", { t: "Qty", right: true }, { t: "Rate", right: true }, { t: "Amount", right: true }] }, (derived.linesBySalesOrder[view.id] || []).map((l, i) => /* @__PURE__ */ React.createElement("tr", { key: l.id }, /* @__PURE__ */ React.createElement(Td, null, i + 1), /* @__PURE__ */ React.createElement(Td, { className: "font-medium" }, l.name), /* @__PURE__ */ React.createElement(Td, { right: true }, fq(l.qty)), /* @__PURE__ */ React.createElement(Td, { right: true }, fmt(l.rate, cur)), /* @__PURE__ */ React.createElement(Td, { right: true, className: "font-bold" }, fmt(l.amount, cur))))), /* @__PURE__ */ React.createElement("div", { className: "text-right mt-3 font-extrabold" }, "Total: ", /* @__PURE__ */ React.createElement("span", { className: "num" }, fmt(view.total, cur)))), confirm && /* @__PURE__ */ React.createElement(Confirm, { msg: `Delete sales order ${confirm.soNo}?`, onYes: () => actions.deleteSalesOrder(confirm.id), onClose: () => setConfirm(null) }));
 }
 function ItemsPage({ db, derived, actions, S }) {
   const cur = S.currency;
@@ -1868,7 +2339,7 @@ function SettingsPage({ db, actions, S }) {
     actions.saveSettings(clean);
   };
   const Sec = ({ title, children }) => /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800 p-4 mb-4" }, /* @__PURE__ */ React.createElement("h3", { className: "text-xs font-bold uppercase tracking-wide text-zinc-500 mb-3" }, title), children);
-  return /* @__PURE__ */ React.createElement("div", { className: "anim-in max-w-2xl" }, /* @__PURE__ */ React.createElement(PageHead, { title: "Settings", right: /* @__PURE__ */ React.createElement(Btn, { kind: "brand", onClick: save }, "Save Settings") }), /* @__PURE__ */ React.createElement(Sec, { title: "Business profile (shown on invoices)" }, /* @__PURE__ */ React.createElement("div", { className: "space-y-3" }, /* @__PURE__ */ React.createElement(Field, { label: "Business name" }, /* @__PURE__ */ React.createElement(Input, { value: f.bizName, onChange: (e) => set("bizName", e.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Tagline" }, /* @__PURE__ */ React.createElement(Input, { value: f.bizTagline, onChange: (e) => set("bizTagline", e.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Address" }, /* @__PURE__ */ React.createElement(Input, { value: f.bizAddress, onChange: (e) => set("bizAddress", e.target.value) })), /* @__PURE__ */ React.createElement("div", { className: "grid grid-cols-2 gap-3" }, /* @__PURE__ */ React.createElement(Field, { label: "Phone" }, /* @__PURE__ */ React.createElement(Input, { value: f.bizPhone, onChange: (e) => set("bizPhone", e.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Email" }, /* @__PURE__ */ React.createElement(Input, { value: f.bizEmail, onChange: (e) => set("bizEmail", e.target.value) }))), /* @__PURE__ */ React.createElement(Field, { label: "GSTIN (optional)" }, /* @__PURE__ */ React.createElement(Input, { value: f.bizGstin, onChange: (e) => set("bizGstin", e.target.value) })))), /* @__PURE__ */ React.createElement(Sec, { title: "Billing" }, /* @__PURE__ */ React.createElement("div", { className: "grid grid-cols-2 gap-3 mb-3" }, /* @__PURE__ */ React.createElement(Field, { label: "Invoice number prefix" }, /* @__PURE__ */ React.createElement(Input, { value: f.invPrefix, onChange: (e) => set("invPrefix", e.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Purchase bill prefix" }, /* @__PURE__ */ React.createElement(Input, { value: f.purPrefix, onChange: (e) => set("purPrefix", e.target.value) }))), /* @__PURE__ */ React.createElement("div", { className: "grid grid-cols-3 gap-3 mb-3" }, /* @__PURE__ */ React.createElement(Field, { label: "Currency symbol" }, /* @__PURE__ */ React.createElement(Input, { value: f.currency, onChange: (e) => set("currency", e.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Tax label" }, /* @__PURE__ */ React.createElement(Input, { value: f.taxLabel, onChange: (e) => set("taxLabel", e.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Tax %" }, /* @__PURE__ */ React.createElement(Input, { value: f.taxPct, onChange: (e) => set("taxPct", e.target.value), inputMode: "decimal" }))), /* @__PURE__ */ React.createElement("label", { className: "flex items-center gap-2 text-sm mb-3" }, /* @__PURE__ */ React.createElement("input", { type: "checkbox", checked: !!f.taxEnabled, onChange: (e) => set("taxEnabled", e.target.checked) }), " Tax ON by default for new invoices"), /* @__PURE__ */ React.createElement("label", { className: "flex items-center gap-2 text-sm" }, /* @__PURE__ */ React.createElement("input", { type: "checkbox", checked: !!f.lowStockAlert, onChange: (e) => set("lowStockAlert", e.target.checked) }), " Show low-stock alerts on dashboard")), /* @__PURE__ */ React.createElement(Sec, { title: "Customisation" }, /* @__PURE__ */ React.createElement("div", { className: "space-y-3" }, /* @__PURE__ */ React.createElement(Field, { label: "Units (comma separated)" }, /* @__PURE__ */ React.createElement(Input, { value: unitsText, onChange: (e) => setUnitsText(e.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Payment modes (comma separated)" }, /* @__PURE__ */ React.createElement(Input, { value: modesText, onChange: (e) => setModesText(e.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Invoice footer note" }, /* @__PURE__ */ React.createElement(Input, { value: f.invoiceFooter, onChange: (e) => set("invoiceFooter", e.target.value) })))), /* @__PURE__ */ React.createElement(Sec, { title: "Data" }, /* @__PURE__ */ React.createElement("div", { className: "flex flex-wrap gap-2" }, /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", onClick: () => exportCSV(db, S) }, "\u2B07 Export all data (CSV)"), /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", onClick: actions.reload }, "\u21BB Reload from Google Sheets")), /* @__PURE__ */ React.createElement("p", { className: "text-[11px] text-zinc-500 mt-2" }, IS_GAS ? "Your Google Sheet IS your backup \u2014 every record lives there. You can also use File \u2192 Make a copy in Sheets for snapshots." : "Local preview mode: data is in this browser only. Deploy to Apps Script to store in Google Sheets.")));
+  return /* @__PURE__ */ React.createElement("div", { className: "anim-in max-w-2xl" }, /* @__PURE__ */ React.createElement(PageHead, { title: "Settings", right: /* @__PURE__ */ React.createElement(Btn, { kind: "brand", onClick: save }, "Save Settings") }), /* @__PURE__ */ React.createElement(Sec, { title: "Business profile (shown on invoices)" }, /* @__PURE__ */ React.createElement("div", { className: "space-y-3" }, /* @__PURE__ */ React.createElement(Field, { label: "Business name" }, /* @__PURE__ */ React.createElement(Input, { value: f.bizName, onChange: (e) => set("bizName", e.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Tagline" }, /* @__PURE__ */ React.createElement(Input, { value: f.bizTagline, onChange: (e) => set("bizTagline", e.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Address" }, /* @__PURE__ */ React.createElement(Input, { value: f.bizAddress, onChange: (e) => set("bizAddress", e.target.value) })), /* @__PURE__ */ React.createElement("div", { className: "grid grid-cols-2 gap-3" }, /* @__PURE__ */ React.createElement(Field, { label: "Phone" }, /* @__PURE__ */ React.createElement(Input, { value: f.bizPhone, onChange: (e) => set("bizPhone", e.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Email" }, /* @__PURE__ */ React.createElement(Input, { value: f.bizEmail, onChange: (e) => set("bizEmail", e.target.value) }))), /* @__PURE__ */ React.createElement(Field, { label: "GSTIN (optional)" }, /* @__PURE__ */ React.createElement(Input, { value: f.bizGstin, onChange: (e) => set("bizGstin", e.target.value) })))), /* @__PURE__ */ React.createElement(Sec, { title: "Billing" }, /* @__PURE__ */ React.createElement("div", { className: "grid grid-cols-2 gap-3 mb-3" }, /* @__PURE__ */ React.createElement(Field, { label: "Invoice number prefix" }, /* @__PURE__ */ React.createElement(Input, { value: f.invPrefix, onChange: (e) => set("invPrefix", e.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Purchase bill prefix" }, /* @__PURE__ */ React.createElement(Input, { value: f.purPrefix, onChange: (e) => set("purPrefix", e.target.value) }))), /* @__PURE__ */ React.createElement("div", { className: "grid grid-cols-3 gap-3 mb-3" }, /* @__PURE__ */ React.createElement(Field, { label: "Quotation prefix" }, /* @__PURE__ */ React.createElement(Input, { value: f.quoPrefix, onChange: (e) => set("quoPrefix", e.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Sales Order prefix" }, /* @__PURE__ */ React.createElement(Input, { value: f.soPrefix, onChange: (e) => set("soPrefix", e.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Sales Return prefix" }, /* @__PURE__ */ React.createElement(Input, { value: f.srPrefix, onChange: (e) => set("srPrefix", e.target.value) }))), /* @__PURE__ */ React.createElement("div", { className: "grid grid-cols-3 gap-3 mb-3" }, /* @__PURE__ */ React.createElement(Field, { label: "Currency symbol" }, /* @__PURE__ */ React.createElement(Input, { value: f.currency, onChange: (e) => set("currency", e.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Tax label" }, /* @__PURE__ */ React.createElement(Input, { value: f.taxLabel, onChange: (e) => set("taxLabel", e.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Tax %" }, /* @__PURE__ */ React.createElement(Input, { value: f.taxPct, onChange: (e) => set("taxPct", e.target.value), inputMode: "decimal" }))), /* @__PURE__ */ React.createElement("label", { className: "flex items-center gap-2 text-sm mb-3" }, /* @__PURE__ */ React.createElement("input", { type: "checkbox", checked: !!f.taxEnabled, onChange: (e) => set("taxEnabled", e.target.checked) }), " Tax ON by default for new invoices"), /* @__PURE__ */ React.createElement("label", { className: "flex items-center gap-2 text-sm" }, /* @__PURE__ */ React.createElement("input", { type: "checkbox", checked: !!f.lowStockAlert, onChange: (e) => set("lowStockAlert", e.target.checked) }), " Show low-stock alerts on dashboard")), /* @__PURE__ */ React.createElement(Sec, { title: "Customisation" }, /* @__PURE__ */ React.createElement("div", { className: "space-y-3" }, /* @__PURE__ */ React.createElement(Field, { label: "Units (comma separated)" }, /* @__PURE__ */ React.createElement(Input, { value: unitsText, onChange: (e) => setUnitsText(e.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Payment modes (comma separated)" }, /* @__PURE__ */ React.createElement(Input, { value: modesText, onChange: (e) => setModesText(e.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Invoice footer note" }, /* @__PURE__ */ React.createElement(Input, { value: f.invoiceFooter, onChange: (e) => set("invoiceFooter", e.target.value) })))), /* @__PURE__ */ React.createElement(Sec, { title: "Data" }, /* @__PURE__ */ React.createElement("div", { className: "flex flex-wrap gap-2" }, /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", onClick: () => exportCSV(db, S) }, "\u2B07 Export all data (CSV)"), /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", onClick: actions.reload }, "\u21BB Reload from Google Sheets")), /* @__PURE__ */ React.createElement("p", { className: "text-[11px] text-zinc-500 mt-2" }, IS_GAS ? "Your Google Sheet IS your backup \u2014 every record lives there. You can also use File \u2192 Make a copy in Sheets for snapshots." : "Local preview mode: data is in this browser only. Deploy to Apps Script to store in Google Sheets.")));
 }
 function exportCSV(db, S) {
   const esc = (v) => `"${String(v != null ? v : "").replace(/"/g, '""')}"`;
@@ -1887,7 +2358,7 @@ function exportCSV(db, S) {
   a.click();
   toast("CSV exported");
 }
-function printInvoice(inv, lines, S, party) {
+function buildInvoiceHtml(inv, lines, S, party) {
   const cur = S.currency;
   const rows = lines.map((l, i) => `
     <tr>
@@ -1899,7 +2370,7 @@ function printInvoice(inv, lines, S, party) {
       <td style="padding:5px 8px;border-bottom:1px solid #eee;text-align:right">${fq(l.rate)}</td>
       <td style="padding:5px 8px;border-bottom:1px solid #eee;text-align:right"><b>${fq(l.amount)}</b></td>
     </tr>`).join("");
-  document.getElementById("print-area").innerHTML = `
+  return `
     <div style="font-family:Arial,sans-serif;color:#111;max-width:800px;margin:0 auto">
       <div style="display:flex;justify-content:space-between;align-items:flex-start;border-bottom:3px solid #dc2626;padding-bottom:12px;margin-bottom:14px">
         <div>
@@ -1947,7 +2418,47 @@ function printInvoice(inv, lines, S, party) {
         <div style="text-align:center"><div style="border-top:1px solid #999;padding-top:4px;min-width:160px">Authorised Signatory</div></div>
       </div>
     </div>`;
+}
+function printInvoice(inv, lines, S, party) {
+  document.getElementById("print-area").innerHTML = buildInvoiceHtml(inv, lines, S, party);
   setTimeout(() => window.print(), 150);
+}
+/** India-first WhatsApp share of an invoice summary — GAS cannot send WhatsApp
+ * messages itself, so this just opens a pre-filled wa.me chat for a manual send. */
+function invoiceWhatsAppLink(inv, S, party) {
+  const msg = `Hi ${inv.partyName}, your invoice ${inv.invNo} dated ${fdate(inv.date)} for ${fmt(inv.total, S.currency)} is ready.${S.invoiceFooter ? " " + S.invoiceFooter : ""} — ${S.bizName}`;
+  const digits = party && party.phone ? String(party.phone).replace(/\D/g, "") : "";
+  const target = digits.length === 10 ? "91" + digits : digits;
+  return `https://wa.me/${target}?text=${encodeURIComponent(msg)}`;
+}
+/**
+ * Download an invoice as a real PDF via GAS's HTML→PDF blob conversion
+ * (Utilities.newBlob(html).getAs('application/pdf')) — no third-party library needed.
+ * Local-preview mode has no GAS runtime to do that conversion, so it falls back to
+ * the print dialog (which already offers "Save as PDF") instead of silently failing.
+ */
+async function downloadInvoicePdf(inv, lines, S, party) {
+  const html = `<!DOCTYPE html><html><head><meta charset="utf-8"></head><body>${buildInvoiceHtml(inv, lines, S, party)}</body></html>`;
+  try {
+    const res = await gs("apiHtmlToPdf", JSON.stringify({ html, filename: `${inv.invNo}.pdf` }));
+    if (!res.base64) {
+      toast("PDF needs the deployed Google Sheets app — printing instead", "warn");
+      printInvoice(inv, lines, S, party);
+      return;
+    }
+    const byteChars = atob(res.base64);
+    const bytes = new Uint8Array(byteChars.length);
+    for (let i = 0; i < byteChars.length; i++) bytes[i] = byteChars.charCodeAt(i);
+    const blob = new Blob([bytes], { type: "application/pdf" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${inv.invNo}.pdf`;
+    a.click();
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    toast("PDF download failed: " + (e.message || e), "err");
+  }
 }
 class ErrorBoundary extends React.Component {
   constructor(props) {

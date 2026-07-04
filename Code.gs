@@ -17,12 +17,22 @@ var SCHEMA = {
   Items: ['id','name','brand','category','unit','packSize','saleRate','purchaseRate','stock','minStock','active'],
   Parties: ['id','name','type','phone','address','gstin','openingBalance','notes','category','visitingCardUrl'],
   PartyContacts: ['id','partyId','name','role','phone','whatsapp'],
-  Invoices: ['id','invNo','date','partyId','partyName','subTotal','discount','taxPct','taxAmt','total','payMode','status','notes','createdAt'],
+  Invoices: ['id','invNo','date','partyId','partyName','subTotal','discount','taxPct','taxAmt','total','payMode','status','notes','createdAt','sourceType','sourceId'],
   InvoiceItems: ['id','invoiceId','itemId','name','brand','packing','packs','qty','rate','amount','cost'],
   Purchases: ['id','billNo','date','partyId','partyName','subTotal','other','total','payMode','notes','createdAt'],
   PurchaseItems: ['id','purchaseId','itemId','name','qty','rate','amount'],
   Payments: ['id','date','partyId','partyName','refType','refId','amount','mode','direction','notes'],
   OpeningBalances: ['id','type','partyId','partyName','billNo','date','amount','paidAmount','notes','createdAt'],
+  // ---- Sales Suite (Module 4): Quotation -> Sales Order -> Invoice -> Sales Return ----
+  // Quotations/SalesOrders mirror the Invoices shape (no payMode — nothing's being paid
+  // yet) plus sourceType/sourceId so a document can record which earlier document it was
+  // converted from, without ever deleting that earlier document (it's marked 'Converted').
+  Quotations: ['id','quoNo','date','partyId','partyName','subTotal','discount','taxPct','taxAmt','total','status','notes','createdAt'],
+  QuotationItems: ['id','quotationId','itemId','name','brand','packing','packs','qty','rate','amount','cost'],
+  SalesOrders: ['id','soNo','date','partyId','partyName','subTotal','discount','taxPct','taxAmt','total','status','notes','createdAt','sourceType','sourceId'],
+  SalesOrderItems: ['id','salesOrderId','itemId','name','brand','packing','packs','qty','rate','amount','cost'],
+  SalesReturns: ['id','srNo','date','partyId','partyName','subTotal','taxAmt','total','status','notes','createdAt','sourceType','sourceId'],
+  SalesReturnItems: ['id','salesReturnId','invoiceItemId','itemId','name','brand','packing','qty','rate','amount'],
   Settings: ['key','value'],
   Counters: ['key','value']
 };
@@ -36,6 +46,9 @@ var DEFAULT_SETTINGS = {
   bizGstin: '',
   invPrefix: 'INV-',
   purPrefix: 'PB-',
+  quoPrefix: 'QUO-',
+  soPrefix: 'SO-',
+  srPrefix: 'SR-',
   taxEnabled: false,
   taxPct: 18,
   taxLabel: 'GST',
@@ -256,7 +269,13 @@ function bootstrap() {
     purchases: readAll_('Purchases'),
     purchaseItems: readAll_('PurchaseItems'),
     payments: readAll_('Payments'),
-    openingBalances: readAll_('OpeningBalances')
+    openingBalances: readAll_('OpeningBalances'),
+    quotations: readAll_('Quotations'),
+    quotationItems: readAll_('QuotationItems'),
+    salesOrders: readAll_('SalesOrders'),
+    salesOrderItems: readAll_('SalesOrderItems'),
+    salesReturns: readAll_('SalesReturns'),
+    salesReturnItems: readAll_('SalesReturnItems')
   });
 }
 
@@ -433,6 +452,179 @@ function apiDeleteContact(id) { return withLock_(function(){ deleteById_('PartyC
 function apiSaveOpeningBalance(json) { return withLock_(function(){ return JSON.stringify({ ok: true, record: upsert_('OpeningBalances', JSON.parse(json)) }); }); }
 function apiDeleteOpeningBalance(id) { return withLock_(function(){ deleteById_('OpeningBalances', id); return JSON.stringify({ ok: true }); }); }
 
+// ================= SALES SUITE (Module 4): Quotation -> Sales Order -> Invoice -> Return =================
+
+/** Flip a document's status to 'Converted' without deleting it — the spec is explicit
+ * that converting a Quotation/Sales Order must never remove the original record. */
+function markConverted_(sheetName, id) {
+  var row = findRow_(sheetName, id);
+  if (row < 1) return;
+  var col = SCHEMA[sheetName].indexOf('status') + 1;
+  if (col > 0) getSheet_(sheetName).getRange(row, col).setValue('Converted');
+}
+function apiMarkConverted(payloadJson) {
+  return withLock_(function() {
+    var payload = JSON.parse(payloadJson);
+    var allowed = ['Quotations', 'SalesOrders'];
+    if (allowed.indexOf(payload.sheet) === -1) throw new Error('Cannot mark converted: ' + payload.sheet);
+    markConverted_(payload.sheet, payload.id);
+    return JSON.stringify({ ok: true });
+  });
+}
+
+/** Quotations never touch stock — nothing has been promised or shipped yet. */
+function apiSaveQuotation(payloadJson) {
+  return withLock_(function() {
+    var payload = JSON.parse(payloadJson);
+    var quo = payload.quotation;
+    var lines = payload.items || [];
+    var isEdit = !!quo.id && findRow_('Quotations', quo.id) > 0;
+    if (isEdit) {
+      deleteChildren_('QuotationItems', 'quotationId', quo.id);
+    } else {
+      if (!quo.quoNo) {
+        var settings = getSettings_();
+        quo.quoNo = settings.quoPrefix + nextCounter_('QUO');
+      }
+      quo.createdAt = new Date().toISOString();
+      quo.status = quo.status || 'Open';
+    }
+    quo = upsert_('Quotations', quo);
+    if (lines.length) {
+      var rows = lines.map(function(l) {
+        l.id = l.id || Utilities.getUuid().slice(0, 8);
+        l.quotationId = quo.id;
+        return toRow_('QuotationItems', l);
+      });
+      var sh = getSheet_('QuotationItems');
+      sh.getRange(sh.getLastRow() + 1, 1, rows.length, rows[0].length).setValues(rows);
+    }
+    return JSON.stringify({ ok: true, quotation: quo, items: readAll_('QuotationItems').filter(function(l){ return l.quotationId === quo.id; }) });
+  });
+}
+function apiDeleteQuotation(id) {
+  return withLock_(function() {
+    deleteChildren_('QuotationItems', 'quotationId', id);
+    deleteById_('Quotations', id);
+    return JSON.stringify({ ok: true });
+  });
+}
+
+/** Sales Orders are a confirmed commitment but still don't move stock — that only
+ * happens once goods actually leave, at Invoice save (same rule as every other module). */
+function apiSaveSalesOrder(payloadJson) {
+  return withLock_(function() {
+    var payload = JSON.parse(payloadJson);
+    var so = payload.salesOrder;
+    var lines = payload.items || [];
+    var isEdit = !!so.id && findRow_('SalesOrders', so.id) > 0;
+    if (isEdit) {
+      deleteChildren_('SalesOrderItems', 'salesOrderId', so.id);
+    } else {
+      if (!so.soNo) {
+        var settings = getSettings_();
+        so.soNo = settings.soPrefix + nextCounter_('SO');
+      }
+      so.createdAt = new Date().toISOString();
+      so.status = so.status || 'Open';
+    }
+    so = upsert_('SalesOrders', so);
+    if (lines.length) {
+      var rows = lines.map(function(l) {
+        l.id = l.id || Utilities.getUuid().slice(0, 8);
+        l.salesOrderId = so.id;
+        return toRow_('SalesOrderItems', l);
+      });
+      var sh = getSheet_('SalesOrderItems');
+      sh.getRange(sh.getLastRow() + 1, 1, rows.length, rows[0].length).setValues(rows);
+    }
+    return JSON.stringify({ ok: true, salesOrder: so, items: readAll_('SalesOrderItems').filter(function(l){ return l.salesOrderId === so.id; }) });
+  });
+}
+function apiDeleteSalesOrder(id) {
+  return withLock_(function() {
+    deleteChildren_('SalesOrderItems', 'salesOrderId', id);
+    deleteById_('SalesOrders', id);
+    return JSON.stringify({ ok: true });
+  });
+}
+
+/**
+ * Save a Sales Return against an existing invoice — partial-line returns are the
+ * normal case (a customer rarely returns 100% of a bill), so `items` only contains
+ * the lines/quantities actually being returned, each tagged with the InvoiceItems
+ * row (`invoiceItemId`) it came from so the UI can stop you over-returning a line.
+ *
+ * Stock comes back IN immediately (same adjustStock_ used everywhere else). The
+ * receivable is reduced by writing a Payments row — Payments stays the ONE source of
+ * truth for "how much of this invoice is settled," so Outstanding/party-balance/ledger
+ * all keep working with zero changes. That payment's `id` is deliberately set equal to
+ * this return's own id (not a random uuid): refId on it has to be the ORIGINAL INVOICE's
+ * id (so paidByRef[invoiceId] includes it), which means refId can't also identify which
+ * return produced it — reusing the return's id as the payment's id gives us an O(1) way
+ * to find and remove exactly that one credit if the return is later deleted.
+ */
+function apiSaveSalesReturn(payloadJson) {
+  return withLock_(function() {
+    var payload = JSON.parse(payloadJson);
+    var sr = payload.salesReturn;
+    var lines = payload.items || [];
+    if (!sr.id) {
+      var settings = getSettings_();
+      sr.id = Utilities.getUuid().slice(0, 8);
+      sr.srNo = settings.srPrefix + nextCounter_('SR');
+      sr.createdAt = new Date().toISOString();
+      sr.status = 'Completed';
+    }
+    sr = upsert_('SalesReturns', sr);
+
+    var deltas = {};
+    if (lines.length) {
+      var rows = lines.map(function(l) {
+        l.id = l.id || Utilities.getUuid().slice(0, 8);
+        l.salesReturnId = sr.id;
+        if (l.itemId) deltas[l.itemId] = (deltas[l.itemId] || 0) + Number(l.qty || 0); // stock back IN
+        return toRow_('SalesReturnItems', l);
+      });
+      var sh = getSheet_('SalesReturnItems');
+      sh.getRange(sh.getLastRow() + 1, 1, rows.length, rows[0].length).setValues(rows);
+    }
+    adjustStock_(deltas);
+
+    if (Number(sr.total) > 0 && sr.sourceId) {
+      upsert_('Payments', {
+        id: sr.id,
+        date: sr.date,
+        partyId: sr.partyId,
+        partyName: sr.partyName,
+        refType: 'SalesReturn',
+        refId: sr.sourceId,
+        amount: Number(sr.total),
+        mode: sr.srNo,
+        direction: 'In',
+        notes: 'Goods returned, return ' + sr.srNo
+      });
+    }
+
+    return JSON.stringify({ ok: true, salesReturn: sr, items: readAll_('SalesReturnItems').filter(function(l){ return l.salesReturnId === sr.id; }) });
+  });
+}
+/** Delete a Sales Return: reverses the stock-in and removes its linked credit (see the
+ * apiSaveSalesReturn comment for why that credit's id equals this return's id). */
+function apiDeleteSalesReturn(id) {
+  return withLock_(function() {
+    var removed = deleteChildren_('SalesReturnItems', 'salesReturnId', id);
+    var deltas = {};
+    removed.forEach(function(l) {
+      if (l.itemId) deltas[l.itemId] = (deltas[l.itemId] || 0) - Number(l.qty || 0); // reverse stock IN
+    });
+    adjustStock_(deltas);
+    deleteById_('Payments', id);
+    deleteById_('SalesReturns', id);
+    return JSON.stringify({ ok: true });
+  });
+}
+
 /**
  * Upload a party's visiting card image to Drive and return its file URL.
  * payload = { partyId, name, mimeType, base64 }. Stored in a single app folder
@@ -482,4 +674,18 @@ function apiSaveSettings(json) {
     if (!written) sh.appendRow(['app', json]);
     return JSON.stringify({ ok: true });
   });
+}
+
+/**
+ * Convert an HTML string (the same markup the browser already uses for on-screen
+ * printing) into a real PDF, so an invoice can be downloaded as a file instead of
+ * only printed. Uses Apps Script's built-in HTML→PDF blob conversion — no
+ * external PDF library needed. Read-only and stateless, so it doesn't need
+ * withLock_ (nothing else is competing for a resource here).
+ */
+function apiHtmlToPdf(payloadJson) {
+  var payload = JSON.parse(payloadJson);
+  var blob = Utilities.newBlob(payload.html, 'text/html', payload.filename || 'document.html');
+  var pdf = blob.getAs('application/pdf');
+  return JSON.stringify({ ok: true, base64: Utilities.base64Encode(pdf.getBytes()) });
 }
