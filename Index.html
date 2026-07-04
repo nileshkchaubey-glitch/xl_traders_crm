@@ -130,7 +130,7 @@ function mockDB() {
     } catch (e) {
     }
   }
-  return { settings: null, items: [], parties: [], partyContacts: [], invoices: [], invoiceItems: [], purchases: [], purchaseItems: [], payments: [], counters: { INV: 0, PUR: 0 } };
+  return { settings: null, items: [], parties: [], partyContacts: [], invoices: [], invoiceItems: [], purchases: [], purchaseItems: [], payments: [], openingBalances: [], counters: { INV: 0, PUR: 0 } };
 }
 function mockSave(db) {
   localStorage.setItem(MOCK_KEY, JSON.stringify(db));
@@ -169,6 +169,7 @@ async function mockServer(fn, args) {
         mockSave(db);
       }
       if (!db.partyContacts) db.partyContacts = [];
+      if (!db.openingBalances) db.openingBalances = [];
       const { counters, ...rest } = db;
       return { ...rest, settings: { ...MOCK_DEFAULT_SETTINGS, ...db.settings } };
     }
@@ -289,6 +290,18 @@ async function mockServer(fn, args) {
     }
     case "apiDeleteContact":
       db.partyContacts = db.partyContacts.filter((x) => x.id !== args[0]);
+      mockSave(db);
+      return { ok: true };
+    case "apiSaveOpeningBalance": {
+      const r = parse(args[0]);
+      if (!r.id) { r.id = uid(); r.createdAt = (/* @__PURE__ */ new Date()).toISOString(); }
+      const i = db.openingBalances.findIndex((x) => x.id === r.id);
+      i >= 0 ? db.openingBalances[i] = r : db.openingBalances.push(r);
+      mockSave(db);
+      return { ok: true, record: r };
+    }
+    case "apiDeleteOpeningBalance":
+      db.openingBalances = db.openingBalances.filter((x) => x.id !== args[0]);
       mockSave(db);
       return { ok: true };
     case "apiUploadVisitingCard": {
@@ -625,6 +638,9 @@ const NAV = [
     { id: "items", icon: "\u{1F3F7}\uFE0F", label: "Items & Stock" },
     { id: "parties", icon: "\u{1F465}", label: "Parties" }
   ] },
+  { sec: "SETUP", items: [
+    { id: "opening-bills", icon: "\u{1F4DC}", label: "Opening Bills" }
+  ] },
   { sec: "INSIGHTS", items: [
     { id: "reports", icon: "\u{1F4CA}", label: "Reports" },
     { id: "settings", icon: "\u2699\uFE0F", label: "Settings" }
@@ -680,9 +696,19 @@ function App() {
     const salesByParty = {}, purByParty = {};
     db.invoices.forEach((i) => salesByParty[i.partyId] = (salesByParty[i.partyId] || 0) + n2(i.total));
     db.purchases.forEach((p) => purByParty[p.partyId] = (purByParty[p.partyId] || 0) + n2(p.total));
+    // Opening balances (Module 3) are historical bills entered before this system existed.
+    // Each row already carries the amount paid BEFORE seeding (its own paidAmount field —
+    // there's no real Payments row for money collected before the app existed); anything
+    // paid AFTER seeding goes through the normal Payments sheet against refId=this row's id,
+    // which paidByRef above already sums generically regardless of refType.
+    const obByParty = {};
+    db.openingBalances.forEach((ob) => {
+      const due = n2(ob.amount) - n2(ob.paidAmount) - (paidByRef[ob.id] || 0);
+      obByParty[ob.partyId] = (obByParty[ob.partyId] || 0) + (ob.type === "Purchase" ? -due : due);
+    });
     const partyBalance = {};
     db.parties.forEach((p) => {
-      partyBalance[p.id] = n2(p.openingBalance) + (salesByParty[p.id] || 0) - (payInByParty[p.id] || 0) - (purByParty[p.id] || 0) + (payOutByParty[p.id] || 0);
+      partyBalance[p.id] = n2(p.openingBalance) + (salesByParty[p.id] || 0) - (payInByParty[p.id] || 0) - (purByParty[p.id] || 0) + (payOutByParty[p.id] || 0) + (obByParty[p.id] || 0);
     });
     const linesByInvoice = {}, linesByPurchase = {};
     db.invoiceItems.forEach((l) => (linesByInvoice[l.invoiceId] = linesByInvoice[l.invoiceId] || []).push(l));
@@ -745,6 +771,24 @@ function App() {
       });
       await gs("apiDeleteContact", id);
       toast("Contact deleted");
+    },
+    saveOpeningBalance: async (ob) => {
+      const res = await gs("apiSaveOpeningBalance", JSON.stringify(ob));
+      mutate((d) => {
+        const i = d.openingBalances.findIndex((x) => x.id === res.record.id);
+        i >= 0 ? d.openingBalances[i] = res.record : d.openingBalances.push(res.record);
+        return d;
+      });
+      toast("Opening bill saved");
+      return res.record;
+    },
+    deleteOpeningBalance: async (id) => {
+      mutate((d) => {
+        d.openingBalances = d.openingBalances.filter((x) => x.id !== id);
+        return d;
+      });
+      await gs("apiDeleteOpeningBalance", id);
+      toast("Opening bill deleted");
     },
     uploadVisitingCard: async (party, file) => {
       const base64 = await new Promise((resolve, reject) => {
@@ -897,6 +941,7 @@ function App() {
     "items": /* @__PURE__ */ React.createElement(ItemsPage, { ...ctx }),
     "parties": /* @__PURE__ */ React.createElement(PartiesPage, { ...ctx }),
     "party-detail": /* @__PURE__ */ React.createElement(PartyDetail, { ...ctx, ...pageProps, key: pageProps.partyId || "party" }),
+    "opening-bills": /* @__PURE__ */ React.createElement(OpeningBillsPage, { ...ctx }),
     "reports": /* @__PURE__ */ React.createElement(ReportsPage, { ...ctx }),
     "settings": /* @__PURE__ */ React.createElement(SettingsPage, { ...ctx })
   };
@@ -1513,6 +1558,76 @@ function PartyNotesTab({ party, actions }) {
   const [notes, setNotes] = useState(party.notes || "");
   return /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800 p-4 max-w-2xl" }, /* @__PURE__ */ React.createElement("h3", { className: "text-xs font-bold uppercase tracking-wide text-zinc-500 mb-3" }, "Notes"), /* @__PURE__ */ React.createElement("p", { className: "text-[11px] text-zinc-500 mb-2" }, "This becomes a full follow-up timeline in a later module — for now it's a free-text notebook for this party."), /* @__PURE__ */ React.createElement("textarea", { value: notes, onChange: (e) => setNotes(e.target.value), rows: 8, className: `${inputCls} resize-y` }), /* @__PURE__ */ React.createElement(Btn, { kind: "brand", className: "mt-3", onClick: () => actions.saveParty({ ...party, notes }) }, "Save Notes"));
 }
+
+/**
+ * Opening Bills (Module 3) — seeds historical bills that predate this system, so day-one
+ * receivable/payable balances are correct without needing to re-enter every old invoice.
+ * A single fast form (no per-row grid — these are one-off entries, not repeating line
+ * items) followed by a party-grouped list of everything seeded so far.
+ */
+function OpeningBillsPage({ db, derived, actions, S }) {
+  const cur = S.currency;
+  const [partyName, setPartyName] = useState("");
+  const [partyId, setPartyId] = useState("");
+  const [type, setType] = useState("Sale");
+  const [billNo, setBillNo] = useState("");
+  const [date, setDate] = useState(today());
+  const [amount, setAmount] = useState("");
+  const [paidAmount, setPaidAmount] = useState("");
+  const [notes, setNotes] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [confirm, setConfirm] = useState(null);
+  const partyRef = useRef(null);
+  const partyOptions = useMemo(() => db.parties.map((p) => ({ id: p.id, label: p.name, sub: p.phone })), [db.parties]);
+  const quickCreateParty = async (name) => {
+    const rec = await actions.saveParty({ name, type: "Both", phone: "", address: "", gstin: "", openingBalance: 0, notes: "" });
+    setPartyId(rec.id);
+    setPartyName(rec.name);
+  };
+  const save = async () => {
+    if (!partyId) {
+      toast("Pick a party (or add a new one)", "warn");
+      return;
+    }
+    if (n2(amount) <= 0) {
+      toast("Enter the total bill amount", "warn");
+      return;
+    }
+    setSaving(true);
+    try {
+      await actions.saveOpeningBalance({ type, partyId, partyName, billNo: billNo.trim(), date, amount: n2(amount), paidAmount: n2(paidAmount), notes });
+      setPartyName("");
+      setPartyId("");
+      setBillNo("");
+      setDate(today());
+      setAmount("");
+      setPaidAmount("");
+      setNotes("");
+      setTimeout(() => partyRef.current && partyRef.current.focus(), 30);
+    } catch (e) {
+      toast("Save failed: " + (e.message || e), "err");
+    }
+    setSaving(false);
+  };
+  const groups = useMemo(() => {
+    const byParty = {};
+    db.openingBalances.forEach((ob) => {
+      (byParty[ob.partyId] = byParty[ob.partyId] || { partyName: ob.partyName, rows: [] }).rows.push(ob);
+    });
+    return Object.values(byParty).map((g) => ({
+      ...g,
+      rows: [...g.rows].sort((a, b) => String(a.date).localeCompare(String(b.date))),
+      totalDue: g.rows.reduce((s, ob) => {
+        const due = n2(ob.amount) - n2(ob.paidAmount) - (derived.paidByRef[ob.id] || 0);
+        return s + (ob.type === "Purchase" ? -due : due);
+      }, 0)
+    })).sort((a, b) => a.partyName.localeCompare(b.partyName));
+  }, [db.openingBalances, derived]);
+  return /* @__PURE__ */ React.createElement("div", { className: "anim-in" }, /* @__PURE__ */ React.createElement(PageHead, { title: "Opening Bills", sub: "Seed old bills from before this system existed — never touches stock or P&L" }), /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800 p-4 mb-4" }, /* @__PURE__ */ React.createElement("h3", { className: "text-xs font-bold uppercase tracking-wide text-zinc-500 mb-3" }, "Add an old bill"), /* @__PURE__ */ React.createElement("div", { className: "grid md:grid-cols-3 gap-3 mb-3" }, /* @__PURE__ */ React.createElement(Field, { label: "Party *" }, /* @__PURE__ */ React.createElement(AutoComplete, { value: partyName, onChange: (v) => { setPartyName(v); setPartyId(""); }, options: partyOptions, onPick: (o) => { setPartyId(o.id); setPartyName(o.label); }, allowCreate: true, onCreate: quickCreateParty, inputRef: (el) => partyRef.current = el, placeholder: "Search or add party…" })), /* @__PURE__ */ React.createElement(Field, { label: "Type", hint: "Sale = they owe us \xB7 Purchase = we owe them" }, /* @__PURE__ */ React.createElement(Select, { value: type, onChange: (e) => setType(e.target.value) }, /* @__PURE__ */ React.createElement("option", { value: "Sale" }, "Sale (receivable)"), /* @__PURE__ */ React.createElement("option", { value: "Purchase" }, "Purchase (payable)"))), /* @__PURE__ */ React.createElement(Field, { label: "Old bill no" }, /* @__PURE__ */ React.createElement(Input, { value: billNo, onChange: (e) => setBillNo(e.target.value), placeholder: "Their original bill/invoice no" }))), /* @__PURE__ */ React.createElement("div", { className: "grid md:grid-cols-3 gap-3 mb-3" }, /* @__PURE__ */ React.createElement(Field, { label: "Bill date" }, /* @__PURE__ */ React.createElement(Input, { type: "date", value: date, onChange: (e) => setDate(e.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: `Total amount (${cur})` }, /* @__PURE__ */ React.createElement(Input, { value: amount, onChange: (e) => setAmount(e.target.value), inputMode: "decimal", placeholder: "0" })), /* @__PURE__ */ React.createElement(Field, { label: `Already paid (${cur})`, hint: "Money collected before this system started" }, /* @__PURE__ */ React.createElement(Input, { value: paidAmount, onChange: (e) => setPaidAmount(e.target.value), inputMode: "decimal", placeholder: "0" }))), /* @__PURE__ */ React.createElement(Field, { label: "Notes" }, /* @__PURE__ */ React.createElement(Input, { value: notes, onChange: (e) => setNotes(e.target.value), placeholder: "Optional…" })), /* @__PURE__ */ React.createElement(Btn, { kind: "brand", className: "mt-3", disabled: saving, onClick: save }, saving ? "Saving…" : "+ Add Opening Bill")), groups.length === 0 ? /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800" }, /* @__PURE__ */ React.createElement(Empty, { icon: "\u{1F4DC}", msg: "No opening bills seeded yet." })) : groups.map((g) => /* @__PURE__ */ React.createElement("div", { key: g.partyId, className: "mb-4" }, /* @__PURE__ */ React.createElement("div", { className: "flex justify-between items-center mb-2" }, /* @__PURE__ */ React.createElement("h3", { className: "font-bold text-sm text-zinc-100" }, g.partyName), /* @__PURE__ */ React.createElement("span", { className: `text-xs font-bold num ${g.totalDue > 0.01 ? "text-amber-400" : g.totalDue < -0.01 ? "text-red-400" : "text-zinc-500"}` }, Math.abs(g.totalDue) < 0.01 ? "Settled" : `${fmt(Math.abs(g.totalDue), cur)} ${g.totalDue > 0 ? "due from them" : "we owe them"}`)), /* @__PURE__ */ React.createElement(Table, { head: ["Type", "Bill No", "Date", { t: "Total", right: true }, { t: "Paid", right: true }, { t: "Due", right: true }, ""] }, g.rows.map((ob) => {
+    const due = n2(ob.amount) - n2(ob.paidAmount) - (derived.paidByRef[ob.id] || 0);
+    return /* @__PURE__ */ React.createElement("tr", { key: ob.id }, /* @__PURE__ */ React.createElement(Td, null, /* @__PURE__ */ React.createElement("span", { className: `px-2 py-0.5 rounded-full text-[10px] font-bold ${ob.type === "Sale" ? "bg-emerald-950/50 text-emerald-400" : "bg-blue-950/50 text-blue-400"}` }, ob.type)), /* @__PURE__ */ React.createElement(Td, { className: "font-semibold" }, ob.billNo || "—"), /* @__PURE__ */ React.createElement(Td, { className: "text-zinc-400 whitespace-nowrap" }, fdate(ob.date)), /* @__PURE__ */ React.createElement(Td, { right: true }, fmt(ob.amount, cur)), /* @__PURE__ */ React.createElement(Td, { right: true, className: "text-emerald-400" }, fmt(n2(ob.paidAmount) + (derived.paidByRef[ob.id] || 0), cur)), /* @__PURE__ */ React.createElement(Td, { right: true, className: due > 0.01 ? "font-bold text-amber-400" : "text-zinc-600" }, due > 0.01 ? fmt(due, cur) : "—"), /* @__PURE__ */ React.createElement(Td, { onClick: (e) => e.stopPropagation() }, /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "xs", className: "!text-red-400", onClick: () => setConfirm(ob) }, "\u{1F5D1}")));
+  })))), confirm && /* @__PURE__ */ React.createElement(Confirm, { msg: `Delete this opening bill for ${confirm.partyName}? This only affects seeded balances, not real invoices.`, onYes: () => actions.deleteOpeningBalance(confirm.id), onClose: () => setConfirm(null) }));
+}
 function PaymentsPage({ db, derived, actions, S, prefillInvoice }) {
   const cur = S.currency;
   const [modal, setModal] = useState(prefillInvoice ? { direction: "In", inv: prefillInvoice } : null);
@@ -1675,6 +1790,19 @@ function buildLedgerEntries(party, db, inRange) {
     dr: pm.direction === "Out" ? n2(pm.amount) : 0,
     cr: pm.direction === "In" ? n2(pm.amount) : 0
   }));
+  // Opening balances: shown net of their own paidAmount (money collected before this system
+  // existed) so the running balance is correct from day one; any payment collected AFTER
+  // seeding is a normal Payments row (already included just above) against this bill's id.
+  db.openingBalances.filter((ob) => ob.partyId === party.id && inRange(ob.date)).forEach((ob) => {
+    const net = n2(ob.amount) - n2(ob.paidAmount);
+    rows.push({
+      date: ob.date,
+      ref: ob.billNo || "Opening",
+      desc: `Opening balance (${ob.type})`,
+      dr: ob.type === "Sale" ? net : 0,
+      cr: ob.type === "Purchase" ? net : 0
+    });
+  });
   rows.sort((a, b) => String(a.date).localeCompare(String(b.date)));
   let bal = n2(party.openingBalance);
   return rows.map((r) => {
@@ -1711,12 +1839,17 @@ function StockReport({ db, cur }) {
 function OutstandingReport({ db, derived, cur }) {
   const rows = useMemo(() => {
     const tk = new Date(today());
-    return db.invoices.map((i) => ({ ...i, due: n2(i.total) - (derived.paidByRef[i.id] || 0) })).filter((i) => i.due > 0.01).map((i) => ({ ...i, days: Math.floor((tk - new Date(String(i.date).slice(0, 10))) / 864e5) })).sort((a, b) => b.days - a.days);
+    const invRows = db.invoices.map((i) => ({ id: i.id, label: i.invNo, date: i.date, partyName: i.partyName, total: n2(i.total), due: n2(i.total) - (derived.paidByRef[i.id] || 0) }));
+    // Opening balances (Module 3) are old bills entered before this system existed \u2014 a
+    // Sale-type one is exactly as much a receivable as a real invoice, so it belongs in
+    // the same aging list, not a separate report the owner has to remember to check.
+    const obRows = db.openingBalances.filter((ob) => ob.type === "Sale").map((ob) => ({ id: ob.id, label: `${ob.billNo || "\u2014"} (Opening)`, date: ob.date, partyName: ob.partyName, total: n2(ob.amount), due: n2(ob.amount) - n2(ob.paidAmount) - (derived.paidByRef[ob.id] || 0) }));
+    return [...invRows, ...obRows].filter((r) => r.due > 0.01).map((r) => ({ ...r, days: Math.floor((tk - new Date(String(r.date).slice(0, 10))) / 864e5) })).sort((a, b) => b.days - a.days);
   }, [db, derived]);
   const bucket = (d) => d <= 15 ? "0\u201315" : d <= 30 ? "16\u201330" : d <= 60 ? "31\u201360" : "60+";
   const buckets = { "0\u201315": 0, "16\u201330": 0, "31\u201360": 0, "60+": 0 };
   rows.forEach((r) => buckets[bucket(r.days)] += r.due);
-  return /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("div", { className: "grid grid-cols-2 md:grid-cols-4 gap-3 mb-4" }, Object.entries(buckets).map(([b, v]) => /* @__PURE__ */ React.createElement(StatCard, { key: b, label: `${b} days`, value: fmt(v, cur), tone: b === "60+" ? "red" : b === "31\u201360" ? "amber" : "ink" }))), rows.length === 0 ? /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800" }, /* @__PURE__ */ React.createElement(Empty, { icon: "\u2705", msg: "Nothing outstanding \u2014 all invoices paid!" })) : /* @__PURE__ */ React.createElement(Table, { head: ["Invoice", "Date", "Party", { t: "Days", right: true }, { t: "Total", right: true }, { t: "Due", right: true }, "Age"] }, rows.map((i) => /* @__PURE__ */ React.createElement("tr", { key: i.id }, /* @__PURE__ */ React.createElement(Td, { className: "font-semibold" }, i.invNo), /* @__PURE__ */ React.createElement(Td, { className: "text-zinc-400 whitespace-nowrap" }, fdate(i.date)), /* @__PURE__ */ React.createElement(Td, null, i.partyName), /* @__PURE__ */ React.createElement(Td, { right: true }, i.days), /* @__PURE__ */ React.createElement(Td, { right: true }, fmt(i.total, cur)), /* @__PURE__ */ React.createElement(Td, { right: true, className: "font-bold text-amber-400" }, fmt(i.due, cur)), /* @__PURE__ */ React.createElement(Td, null, /* @__PURE__ */ React.createElement("span", { className: `px-2 py-0.5 rounded-full text-[10px] font-bold ${i.days > 60 ? "bg-red-950/50 text-red-400" : i.days > 30 ? "bg-amber-950/50 text-amber-400" : "bg-zinc-800 text-zinc-400"}` }, bucket(i.days)))))));
+  return /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("div", { className: "grid grid-cols-2 md:grid-cols-4 gap-3 mb-4" }, Object.entries(buckets).map(([b, v]) => /* @__PURE__ */ React.createElement(StatCard, { key: b, label: `${b} days`, value: fmt(v, cur), tone: b === "60+" ? "red" : b === "31\u201360" ? "amber" : "ink" }))), rows.length === 0 ? /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800" }, /* @__PURE__ */ React.createElement(Empty, { icon: "\u2705", msg: "Nothing outstanding \u2014 all invoices paid!" })) : /* @__PURE__ */ React.createElement(Table, { head: ["Invoice", "Date", "Party", { t: "Days", right: true }, { t: "Total", right: true }, { t: "Due", right: true }, "Age"] }, rows.map((i) => /* @__PURE__ */ React.createElement("tr", { key: i.id }, /* @__PURE__ */ React.createElement(Td, { className: "font-semibold" }, i.label), /* @__PURE__ */ React.createElement(Td, { className: "text-zinc-400 whitespace-nowrap" }, fdate(i.date)), /* @__PURE__ */ React.createElement(Td, null, i.partyName), /* @__PURE__ */ React.createElement(Td, { right: true }, i.days), /* @__PURE__ */ React.createElement(Td, { right: true }, fmt(i.total, cur)), /* @__PURE__ */ React.createElement(Td, { right: true, className: "font-bold text-amber-400" }, fmt(i.due, cur)), /* @__PURE__ */ React.createElement(Td, null, /* @__PURE__ */ React.createElement("span", { className: `px-2 py-0.5 rounded-full text-[10px] font-bold ${i.days > 60 ? "bg-red-950/50 text-red-400" : i.days > 30 ? "bg-amber-950/50 text-amber-400" : "bg-zinc-800 text-zinc-400"}` }, bucket(i.days)))))));
 }
 function SettingsPage({ db, actions, S }) {
   const [f, setF] = useState({ ...S });

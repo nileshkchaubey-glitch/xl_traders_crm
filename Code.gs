@@ -22,6 +22,7 @@ var SCHEMA = {
   Purchases: ['id','billNo','date','partyId','partyName','subTotal','other','total','payMode','notes','createdAt'],
   PurchaseItems: ['id','purchaseId','itemId','name','qty','rate','amount'],
   Payments: ['id','date','partyId','partyName','refType','refId','amount','mode','direction','notes'],
+  OpeningBalances: ['id','type','partyId','partyName','billNo','date','amount','paidAmount','notes','createdAt'],
   Settings: ['key','value'],
   Counters: ['key','value']
 };
@@ -254,7 +255,8 @@ function bootstrap() {
     invoiceItems: readAll_('InvoiceItems'),
     purchases: readAll_('Purchases'),
     purchaseItems: readAll_('PurchaseItems'),
-    payments: readAll_('Payments')
+    payments: readAll_('Payments'),
+    openingBalances: readAll_('OpeningBalances')
   });
 }
 
@@ -424,6 +426,12 @@ function apiDeletePayment(id) { return withLock_(function(){ deleteById_('Paymen
 // ---- Party contacts (Module 2: CRM depth — one party can have many people) ----
 function apiSaveContact(json) { return withLock_(function(){ return JSON.stringify({ ok: true, record: upsert_('PartyContacts', JSON.parse(json)) }); }); }
 function apiDeleteContact(id) { return withLock_(function(){ deleteById_('PartyContacts', id); return JSON.stringify({ ok: true }); }); }
+
+// ---- Opening balances (Module 3: seed historical bills that predate this system) ----
+// Deliberately as simple as apiSaveItem/apiSaveParty above — no stock, no counters, no
+// P&L impact, so it needs none of the transactional machinery those writes use.
+function apiSaveOpeningBalance(json) { return withLock_(function(){ return JSON.stringify({ ok: true, record: upsert_('OpeningBalances', JSON.parse(json)) }); }); }
+function apiDeleteOpeningBalance(id) { return withLock_(function(){ deleteById_('OpeningBalances', id); return JSON.stringify({ ok: true }); }); }
 
 /**
  * Upload a party's visiting card image to Drive and return its file URL.

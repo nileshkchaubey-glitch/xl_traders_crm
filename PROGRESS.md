@@ -12,7 +12,7 @@ Resume rule: read this file, find the first module NOT marked `[DONE]`, start th
 - [DONE] Module 0 — Global dark re-theme — 2026-07-04
 - [DONE] Module 1 — Keyboard core + Confirm-on-Save + Command Palette — 2026-07-04
 - [DONE] Module 2 — Customer & Supplier CRM depth — 2026-07-04
-- [ ] Module 3 — Opening Bills (OpeningBalances)
+- [DONE] Module 3 — Opening Bills (OpeningBalances) — 2026-07-04
 - [ ] Module 4 — Sales Suite (Quotation → SO → Invoice → Return)
 - [ ] Module 5 — Dispatch Tracking + Cash/Credit Sale Type + Payment Risk Alert
 - [ ] Module 6 — Purchase Suite (Purchase Return + supplier bill matching)
@@ -76,31 +76,56 @@ Verified in a real browser: create party → add contact → WhatsApp/Call icons
 (empty state) → Documents tab (upload UI) → Notes save → Category field round-trips after tab
 switch.
 
+## Module 3 detail
+Added `OpeningBalances` sheet + `apiSaveOpeningBalance`/`apiDeleteOpeningBalance` (simple upsert,
+no stock/counter/P&L side effects, per spec). Each row stores its own `paidAmount` — money
+collected *before* this system existed, so there's no real Payments row for it; anything
+collected *after* seeding goes through the normal Payments sheet against `refId` = the opening
+balance's id, which the existing `paidByRef` map already sums generically regardless of refType.
+Updated all three read-sites the spec calls out as the most likely place to introduce a bug:
+- `derived.partyBalance` (App.js) — added `obByParty`, net of each row's own paidAmount and any
+  linked Payments, sign-flipped for Purchase-type rows.
+- `buildLedgerEntries()` — one shared function (from the Module 2 refactor) already covers both
+  the Reports → Party Ledger tab and the Party Detail → Ledger tab, so this fix landed in both
+  places at once. Each opening balance appears as a single net dr/cr row dated at the bill's own
+  date; a later real payment against it shows as its own separate ledger line, same as any invoice.
+- `OutstandingReport` — Sale-type opening balances are merged into the same aging list as real
+  invoices (labeled "`<billNo>` (Opening)"), not a separate report the owner has to remember to
+  check.
+Built `OpeningBillsPage` (nav: SETUP → Opening Bills): a single fast form (party autocomplete
+with quick-add, Sale/Purchase, bill no, date, total, already-paid, notes) — no per-row grid, since
+these are one-off entries, not repeating line items — followed by a party-grouped list showing
+each old bill's remaining due.
+Verified end-to-end in a real browser: seeded one Sale-type opening bill (₹5,000 total, ₹2,000
+already paid) and confirmed the ₹3,000 due appears correctly and consistently on the Dashboard's
+"To Receive" card, the Outstanding aging report, and the party's Ledger tab.
+
 ## Notes
 - Testing method: mock mode only (localStorage mockServer, IS_GAS=false), verified by opening
   Index.html directly in a browser (Playwright/Chromium) — no Google login is available in this
   environment, so live-Sheet testing is the human's job after each module (see bottom of
   ONESHOT_PROMPT1.md for the exact 3 steps).
 
-## STATUS AS OF 2026-07-04 — resume from Module 3
+## STATUS AS OF 2026-07-04 — resume from Module 4
 
-**Fully done, verified, committed:** Modules 0, 1, 2 (dark re-theme, keyboard core, CRM depth).
-Each was checked by actually running the app in a headless Chromium browser against the mock
-server, not just read for correctness — screenshots confirmed dark theme consistency, keyboard
-grid navigation, the save-confirm flow, the command palette, and the new Party Detail page all
-work as specified.
+**Fully done, verified, committed:** Modules 0, 1, 2, 3 (dark re-theme, keyboard core, CRM depth,
+opening balances). Each was checked by actually running the app in a headless Chromium browser
+against the mock server, not just read for correctness — screenshots confirmed dark theme
+consistency, keyboard grid navigation, the save-confirm flow, the command palette, the Party
+Detail page, and opening-balance seeding landing consistently on the Dashboard, Outstanding
+report, and party Ledger all work as specified.
 
-**Not started: Modules 3–12.** This is the honest state — the remaining modules (Opening
-Balances, the full Quotation→SO→Invoice→Return suite, Dispatch tracking, Purchase Returns, Bulk
-Payment Entry, Categories/Brands/Stock Ledger, Follow-up CRM, Admin/Roles, Reports/Charts, and
-the final QA pass) are comparable in size to Modules 0–2 combined, several times over — Module 4
-alone (four new document types with a conversion pipeline between them) is bigger than everything
-done so far. Building all of them to the same standard (real schema changes, real mock-server
-parity, real browser verification, no placeholders) in one sitting was not realistic without
-either rushing the quality bar or silently stopping partway through a module. Stopping at a clean
-module boundary, with everything so far genuinely finished and tested, was the more honest choice.
+**Not started: Modules 4–12.** This is the honest state — the remaining modules (the full
+Quotation→SO→Invoice→Return suite, Dispatch tracking, Purchase Returns, Bulk Payment Entry,
+Categories/Brands/Stock Ledger, Follow-up CRM, Admin/Roles, Reports/Charts, and the final QA pass)
+are comparable in size to Modules 0–3 combined, several times over — Module 4 alone (four new
+document types with a conversion pipeline between them) is bigger than everything done so far.
+Building all of them to the same standard (real schema changes, real mock-server parity, real
+browser verification, no placeholders) in one sitting was not realistic without either rushing
+the quality bar or silently stopping partway through a module. Stopping at a clean module
+boundary, with everything so far genuinely finished and tested, was the more honest choice.
 
 **To resume:** open a new session against this same branch/repo, tell Claude "read PROGRESS.md,
-resume from Module 3," and it starts on Opening Balances (schema + entry screen + updating
-partyBalance/LedgerReport/OutstandingReport to include it — the note in ONESHOT_PROMPT1.md flags
-"forgetting one of those three read-sites" as the most likely bug, worth double-checking).
+resume from Module 4," and it starts on the Sales Suite (Quotation → Sales Order → Invoice →
+Sales Return, one-click conversion carrying lines forward and marking the source Converted
+instead of deleting it, WhatsApp share link, PDF download).
