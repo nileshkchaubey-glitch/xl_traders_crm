@@ -503,6 +503,16 @@ async function mockServer(fn, args) {
       mockSave(db);
       return { ok: true, record: r };
     }
+    case "apiSaveBulkPayment": {
+      const p = parse(args[0]);
+      const records = (p.allocations || []).filter((a) => n2(a.amount) > 0).map((a) => ({ id: uid(), date: p.date, partyId: p.partyId, partyName: p.partyName, refType: a.refType, refId: a.refId, amount: n2(a.amount), mode: p.mode, direction: p.direction, notes: p.notes || "" }));
+      if (n2(p.onAccountAmount) > 0) {
+        records.push({ id: uid(), date: p.date, partyId: p.partyId, partyName: p.partyName, refType: "OnAccount", refId: "", amount: n2(p.onAccountAmount), mode: p.mode, direction: p.direction, notes: p.notes || "" });
+      }
+      db.payments.push(...records);
+      mockSave(db);
+      return { ok: true, records };
+    }
     case "apiDeleteItem":
       db.items = db.items.filter((x) => x.id !== args[0]);
       mockSave(db);
@@ -818,7 +828,8 @@ const NAV = [
     { id: "dashboard", icon: "\u25A6", label: "Dashboard" },
     { id: "new-sale", icon: "\u{1F9FE}", label: "New Sale" },
     { id: "sales", icon: "\u{1F4CB}", label: "Sales List" },
-    { id: "payments", icon: "\u{1F4B0}", label: "Payments" }
+    { id: "payments", icon: "\u{1F4B0}", label: "Payments" },
+    { id: "bulk-payment", icon: "\u{1F4B8}", label: "Bulk Payment" }
   ] },
   { sec: "SALES SUITE", items: [
     { id: "quotations", icon: "\u{1F4C4}", label: "Quotations" },
@@ -1256,6 +1267,15 @@ function App() {
       toast("Payment recorded");
       return res.record;
     },
+    saveBulkPayment: async (payload) => {
+      const res = await gs("apiSaveBulkPayment", JSON.stringify(payload));
+      mutate((d) => {
+        d.payments = d.payments.concat(res.records);
+        return d;
+      });
+      toast(`${res.records.length} payment${res.records.length === 1 ? "" : "s"} recorded`);
+      return res.records;
+    },
     deletePayment: async (id) => {
       mutate((d) => {
         d.payments = d.payments.filter((x) => x.id !== id);
@@ -1290,6 +1310,7 @@ function App() {
     "new-sale": /* @__PURE__ */ React.createElement(NewSale, { ...ctx, ...pageProps, key: pageProps.editId || pageProps.convertFrom && pageProps.convertFrom.id || "new" }),
     "sales": /* @__PURE__ */ React.createElement(SalesList, { ...ctx, ...pageProps }),
     "payments": /* @__PURE__ */ React.createElement(PaymentsPage, { ...ctx, ...pageProps }),
+    "bulk-payment": /* @__PURE__ */ React.createElement(BulkPaymentPage, { ...ctx }),
     "new-purchase": /* @__PURE__ */ React.createElement(NewPurchase, { ...ctx, ...pageProps, key: pageProps.editId || "newp" }),
     "purchases": /* @__PURE__ */ React.createElement(PurchaseList, { ...ctx }),
     "purchase-returns": /* @__PURE__ */ React.createElement(PurchaseReturnsList, { ...ctx }),
@@ -2310,7 +2331,7 @@ function OpeningBillsPage({ db, derived, actions, S }) {
     return /* @__PURE__ */ React.createElement("tr", { key: ob.id }, /* @__PURE__ */ React.createElement(Td, null, /* @__PURE__ */ React.createElement("span", { className: `px-2 py-0.5 rounded-full text-[10px] font-bold ${ob.type === "Sale" ? "bg-emerald-950/50 text-emerald-400" : "bg-blue-950/50 text-blue-400"}` }, ob.type)), /* @__PURE__ */ React.createElement(Td, { className: "font-semibold" }, ob.billNo || "—"), /* @__PURE__ */ React.createElement(Td, { className: "text-zinc-400 whitespace-nowrap" }, fdate(ob.date)), /* @__PURE__ */ React.createElement(Td, { right: true }, fmt(ob.amount, cur)), /* @__PURE__ */ React.createElement(Td, { right: true, className: "text-emerald-400" }, fmt(n2(ob.paidAmount) + (derived.paidByRef[ob.id] || 0), cur)), /* @__PURE__ */ React.createElement(Td, { right: true, className: due > 0.01 ? "font-bold text-amber-400" : "text-zinc-600" }, due > 0.01 ? fmt(due, cur) : "—"), /* @__PURE__ */ React.createElement(Td, { onClick: (e) => e.stopPropagation() }, /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "xs", className: "!text-red-400", onClick: () => setConfirm(ob) }, "\u{1F5D1}")));
   })))), confirm && /* @__PURE__ */ React.createElement(Confirm, { msg: `Delete this opening bill for ${confirm.partyName}? This only affects seeded balances, not real invoices.`, onYes: () => actions.deleteOpeningBalance(confirm.id), onClose: () => setConfirm(null) }));
 }
-function PaymentsPage({ db, derived, actions, S, prefillInvoice }) {
+function PaymentsPage({ db, derived, actions, go, S, prefillInvoice }) {
   const cur = S.currency;
   const [modal, setModal] = useState(prefillInvoice ? { direction: "In", inv: prefillInvoice } : null);
   const [confirm, setConfirm] = useState(null);
@@ -2325,7 +2346,7 @@ function PaymentsPage({ db, derived, actions, S, prefillInvoice }) {
   }, [db.payments, q]);
   const totIn = rows.filter((p) => p.direction === "In").reduce((s, p) => s + n2(p.amount), 0);
   const totOut = rows.filter((p) => p.direction === "Out").reduce((s, p) => s + n2(p.amount), 0);
-  return /* @__PURE__ */ React.createElement("div", { className: "anim-in" }, /* @__PURE__ */ React.createElement(PageHead, { title: "Payments", sub: `In ${fmt(totIn, cur)} \xB7 Out ${fmt(totOut, cur)}`, right: /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement(Btn, { kind: "brand", onClick: () => setModal({ direction: "In" }) }, "+ Receive"), /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", onClick: () => setModal({ direction: "Out" }) }, "\u2212 Pay Out")) }), /* @__PURE__ */ React.createElement(Input, { value: q, onChange: (e) => setQ(e.target.value), placeholder: "\u{1F50D} Search party / mode\u2026", className: "!w-64 mb-3" }), rows.length === 0 ? /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800" }, /* @__PURE__ */ React.createElement(Empty, { icon: "\u{1F4B0}", msg: "No payments recorded yet." })) : /* @__PURE__ */ React.createElement(Table, { head: ["Date", "Party", "Type", "Ref", "Mode", { t: "Amount", right: true }, ""] }, rows.map((p) => {
+  return /* @__PURE__ */ React.createElement("div", { className: "anim-in" }, /* @__PURE__ */ React.createElement(PageHead, { title: "Payments", sub: `In ${fmt(totIn, cur)} \xB7 Out ${fmt(totOut, cur)}`, right: /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement(Btn, { kind: "brand", onClick: () => setModal({ direction: "In" }) }, "+ Receive"), /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", onClick: () => setModal({ direction: "Out" }) }, "\u2212 Pay Out"), /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", onClick: () => go("bulk-payment") }, "\u{1F4B8} Bulk Payment")) }), /* @__PURE__ */ React.createElement(Input, { value: q, onChange: (e) => setQ(e.target.value), placeholder: "\u{1F50D} Search party / mode\u2026", className: "!w-64 mb-3" }), rows.length === 0 ? /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800" }, /* @__PURE__ */ React.createElement(Empty, { icon: "\u{1F4B0}", msg: "No payments recorded yet." })) : /* @__PURE__ */ React.createElement(Table, { head: ["Date", "Party", "Type", "Ref", "Mode", { t: "Amount", right: true }, ""] }, rows.map((p) => {
     const ref = p.refType === "Sale" ? db.invoices.find((i) => i.id === p.refId) : p.refType === "Purchase" ? db.purchases.find((x) => x.id === p.refId) : null;
     return /* @__PURE__ */ React.createElement("tr", { key: p.id }, /* @__PURE__ */ React.createElement(Td, { className: "whitespace-nowrap text-zinc-400" }, fdate(p.date)), /* @__PURE__ */ React.createElement(Td, { className: "font-semibold" }, p.partyName || "\u2014"), /* @__PURE__ */ React.createElement(Td, null, /* @__PURE__ */ React.createElement("span", { className: `px-2 py-0.5 rounded-full text-[10px] font-bold ${p.direction === "In" ? "bg-emerald-950/50 text-emerald-400" : "bg-red-950/50 text-red-400"}` }, p.direction === "In" ? "RECEIVED" : "PAID")), /* @__PURE__ */ React.createElement(Td, { className: "text-zinc-400 text-xs" }, ref ? ref.invNo || ref.billNo : p.refType === "OnAccount" ? "On account" : "\u2014"), /* @__PURE__ */ React.createElement(Td, { className: "text-zinc-400" }, p.mode), /* @__PURE__ */ React.createElement(Td, { right: true, className: `font-bold ${p.direction === "In" ? "text-emerald-400" : "text-red-400"}` }, p.direction === "In" ? "+" : "\u2212", fmt(p.amount, cur)), /* @__PURE__ */ React.createElement(Td, null, /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "xs", className: "!text-red-400", onClick: () => setConfirm(p) }, "\u{1F5D1}")));
   })), modal && /* @__PURE__ */ React.createElement(PaymentModal, { cfg: modal, db, derived, S, onSave: async (pm) => {
@@ -2380,6 +2401,95 @@ function PaymentModal({ cfg, db, derived, S, onSave, onClose }) {
     }
     onSave({ date, partyId, partyName, refType: refId ? isIn ? "Sale" : "Purchase" : "OnAccount", refId, amount: n2(amount), mode, direction: cfg.direction, notes: "" });
   } }, isIn ? "Receive" : "Pay", " ", n2(amount) > 0 ? fmt(amount, cur) : ""))));
+}
+/**
+ * Bulk Payment Entry (Module 7): one amount handed over by/to a party, split across
+ * several of their open invoices/bills in one shot — the common case when a customer
+ * clears several old bills with a single cheque/transfer instead of one payment per
+ * bill. Auto-allocates oldest-first as soon as a total amount is entered (editable per
+ * line after that); any amount above what's actually due goes on account automatically
+ * rather than being silently dropped.
+ */
+function BulkPaymentPage({ db, derived, actions, go, S }) {
+  const cur = S.currency;
+  const [direction, setDirection] = useState("In");
+  const isIn = direction === "In";
+  const [partyName, setPartyName] = useState("");
+  const [partyId, setPartyId] = useState("");
+  const [date, setDate] = useState(today());
+  const [mode, setMode] = useState(S.payModes[0] || "Cash");
+  const [notes, setNotes] = useState("");
+  const [totalAmount, setTotalAmount] = useState("");
+  const [alloc, setAlloc] = useState({});
+  const [saving, setSaving] = useState(false);
+  const partyOptions = useMemo(() => db.parties.filter((p) => isIn ? p.type !== "Supplier" : p.type !== "Customer").map((p) => ({ id: p.id, label: p.name, sub: p.phone })), [db.parties, isIn]);
+  const openDocs = useMemo(() => {
+    if (!partyId) return [];
+    const docs = isIn ? db.invoices.filter((i) => i.partyId === partyId) : db.purchases.filter((p) => p.partyId === partyId);
+    return docs.map((d) => ({ id: d.id, no: d.invNo || d.billNo, date: d.date, due: n2(d.total) - (derived.paidByRef[d.id] || 0) })).filter((d) => d.due > 0.01).sort((a, b) => String(a.date).localeCompare(String(b.date)));
+  }, [partyId, db, derived, isIn]);
+  const pickParty = (id, name) => {
+    setPartyId(id);
+    setPartyName(name);
+    setAlloc({});
+  };
+  const autoAllocate = (amt) => {
+    let left = n2(amt);
+    const next = {};
+    openDocs.forEach((d) => {
+      const take = Math.max(0, Math.min(d.due, left));
+      if (take > 0) next[d.id] = String(take);
+      left -= take;
+    });
+    setAlloc(next);
+  };
+  const setTotal = (v) => {
+    setTotalAmount(v);
+    autoAllocate(v);
+  };
+  const setLine = (id, v, max) => {
+    const capped = v === "" ? "" : String(Math.min(Math.max(n2(v), 0), max));
+    setAlloc((a) => ({ ...a, [id]: capped }));
+  };
+  const allocated = Object.values(alloc).reduce((s, v) => s + n2(v), 0);
+  const onAccount = Math.max(0, n2(totalAmount) - allocated);
+  const overAllocated = allocated > n2(totalAmount) + 0.01;
+  const save = async () => {
+    if (!partyId) {
+      toast("Select a party", "warn");
+      return;
+    }
+    if (n2(totalAmount) <= 0) {
+      toast("Enter the amount received", "warn");
+      return;
+    }
+    if (overAllocated) {
+      toast("Allocated amount exceeds the total entered", "warn");
+      return;
+    }
+    setSaving(true);
+    try {
+      const allocations = openDocs.filter((d) => n2(alloc[d.id]) > 0).map((d) => ({ refType: isIn ? "Sale" : "Purchase", refId: d.id, amount: n2(alloc[d.id]) }));
+      await actions.saveBulkPayment({ date, partyId, partyName, mode, direction, notes, allocations, onAccountAmount: onAccount });
+      go("payments");
+    } catch (e) {
+      toast("Save failed: " + (e.message || e), "err");
+    }
+    setSaving(false);
+  };
+  return /* @__PURE__ */ React.createElement("div", { className: "anim-in" }, /* @__PURE__ */ React.createElement(PageHead, { title: "Bulk Payment Entry", sub: "One amount, split across several open bills at once", right: /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "sm", onClick: () => go("payments") }, "← Payments") }), /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800 p-4 mb-3" }, /* @__PURE__ */ React.createElement("div", { className: "flex gap-2 mb-3" }, /* @__PURE__ */ React.createElement(Btn, { kind: isIn ? "brand" : "ghost", size: "sm", onClick: () => { setDirection("In"); setPartyId(""); setPartyName(""); setAlloc({}); } }, "Receive (Customer)"), /* @__PURE__ */ React.createElement(Btn, { kind: !isIn ? "brand" : "ghost", size: "sm", onClick: () => { setDirection("Out"); setPartyId(""); setPartyName(""); setAlloc({}); } }, "Pay Out (Supplier)")), /* @__PURE__ */ React.createElement("div", { className: "grid md:grid-cols-4 gap-3" }, /* @__PURE__ */ React.createElement(Field, { label: isIn ? "Customer *" : "Supplier *" }, /* @__PURE__ */ React.createElement(
+    AutoComplete,
+    {
+      value: partyName,
+      onChange: (v) => {
+        setPartyName(v);
+        setPartyId("");
+      },
+      options: partyOptions,
+      onPick: (o) => pickParty(o.id, o.label),
+      placeholder: isIn ? "Search customer…" : "Search supplier…"
+    }
+  )), /* @__PURE__ */ React.createElement(Field, { label: "Date" }, /* @__PURE__ */ React.createElement(Input, { type: "date", value: date, onChange: (e) => setDate(e.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Mode" }, /* @__PURE__ */ React.createElement(Select, { value: mode, onChange: (e) => setMode(e.target.value) }, S.payModes.map((m) => /* @__PURE__ */ React.createElement("option", { key: m }, m)))), /* @__PURE__ */ React.createElement(Field, { label: `Total amount (${cur}) *` }, /* @__PURE__ */ React.createElement(Input, { value: totalAmount, onChange: (e) => setTotal(e.target.value), inputMode: "decimal", placeholder: "0", disabled: !partyId })))), partyId && /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800 p-4 mb-3" }, openDocs.length === 0 ? /* @__PURE__ */ React.createElement(Empty, { icon: "✅", msg: `No open ${isIn ? "invoices" : "bills"} for this party — the full amount will be recorded on account.` }) : /* @__PURE__ */ React.createElement(Table, { head: [isIn ? "Invoice" : "Bill", "Date", { t: "Due", right: true }, { t: "Allocate", right: true }] }, openDocs.map((d) => /* @__PURE__ */ React.createElement("tr", { key: d.id }, /* @__PURE__ */ React.createElement(Td, { className: "font-semibold" }, d.no), /* @__PURE__ */ React.createElement(Td, { className: "text-zinc-400 whitespace-nowrap" }, fdate(d.date)), /* @__PURE__ */ React.createElement(Td, { right: true }, fmt(d.due, cur)), /* @__PURE__ */ React.createElement(Td, { right: true }, /* @__PURE__ */ React.createElement("input", { value: alloc[d.id] ?? "", onChange: (e) => setLine(d.id, e.target.value, d.due), inputMode: "decimal", className: "w-24 px-2 py-1 text-right text-sm bg-zinc-800 border border-zinc-700 text-zinc-100 rounded-md focus:border-red-500 focus:ring-2 focus:ring-red-500/30 num", placeholder: "0" }))))), /* @__PURE__ */ React.createElement("div", { className: "flex flex-wrap items-center justify-between gap-3 mt-3 pt-3 border-t border-zinc-800" }, /* @__PURE__ */ React.createElement("div", { className: "text-sm text-zinc-400" }, "Allocated ", /* @__PURE__ */ React.createElement("b", { className: `num ${overAllocated ? "text-red-400" : "text-zinc-100"}` }, fmt(allocated, cur)), " \xB7 On account ", /* @__PURE__ */ React.createElement("b", { className: "num text-emerald-400" }, fmt(onAccount, cur))), /* @__PURE__ */ React.createElement(Btn, { kind: "brand", disabled: saving || n2(totalAmount) <= 0 || overAllocated, onClick: save }, saving ? "Saving…" : `Save \xB7 ${fmt(n2(totalAmount), cur)}`))));
 }
 function ReportsPage({ db, derived, S, tab: initTab, partyId: initParty }) {
   const cur = S.currency;

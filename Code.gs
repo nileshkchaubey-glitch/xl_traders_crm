@@ -461,6 +461,28 @@ function apiDeleteItem(id)    { return withLock_(function(){ deleteById_('Items'
 function apiDeleteParty(id)   { return withLock_(function(){ deleteById_('Parties', id); deleteChildren_('PartyContacts', 'partyId', id); return JSON.stringify({ ok: true }); }); }
 function apiDeletePayment(id) { return withLock_(function(){ deleteById_('Payments', id); return JSON.stringify({ ok: true }); }); }
 
+/** Bulk Payment Entry (Module 7): one physical amount handed over by/to a party, split
+ * across several of their open documents in a single atomic write — e.g. a customer
+ * pays 10,000 that happens to cover three separate invoices at once. Writes one
+ * Payments row per allocation (so paidByRef/ledger/outstanding math on the client needs
+ * no new logic, it already sums by refId), plus one extra row for any amount kept
+ * "on account" (no refId) if the party paid more than their open documents needed.
+ * payload = { date, partyId, partyName, mode, direction, notes,
+ *             allocations: [{ refType, refId, amount }], onAccountAmount }
+ */
+function apiSaveBulkPayment(json) {
+  return withLock_(function() {
+    var p = JSON.parse(json);
+    var records = (p.allocations || []).filter(function(a) { return Number(a.amount) > 0; }).map(function(a) {
+      return upsert_('Payments', { id: '', date: p.date, partyId: p.partyId, partyName: p.partyName, refType: a.refType, refId: a.refId, amount: Number(a.amount), mode: p.mode, direction: p.direction, notes: p.notes || '' });
+    });
+    if (Number(p.onAccountAmount) > 0) {
+      records.push(upsert_('Payments', { id: '', date: p.date, partyId: p.partyId, partyName: p.partyName, refType: 'OnAccount', refId: '', amount: Number(p.onAccountAmount), mode: p.mode, direction: p.direction, notes: p.notes || '' }));
+    }
+    return JSON.stringify({ ok: true, records: records });
+  });
+}
+
 // ---- Party contacts (Module 2: CRM depth — one party can have many people) ----
 function apiSaveContact(json) { return withLock_(function(){ return JSON.stringify({ ok: true, record: upsert_('PartyContacts', JSON.parse(json)) }); }); }
 function apiDeleteContact(id) { return withLock_(function(){ deleteById_('PartyContacts', id); return JSON.stringify({ ok: true }); }); }

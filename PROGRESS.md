@@ -16,7 +16,7 @@ Resume rule: read this file, find the first module NOT marked `[DONE]`, start th
 - [DONE] Module 4 — Sales Suite (Quotation → SO → Invoice → Return) — 2026-07-04
 - [DONE] Module 5 — Dispatch Tracking + Cash/Credit Sale Type + Payment Risk Alert — 2026-07-04
 - [DONE] Module 6 — Purchase Suite (Purchase Return + supplier bill matching) — 2026-07-04
-- [ ] Module 7 — Bulk Payment Entry
+- [DONE] Module 7 — Bulk Payment Entry — 2026-07-04
 - [ ] Module 8 — Products, Categories, Brands, Stock Ledger
 - [ ] Module 9 — Follow-up CRM
 - [ ] Module 10 — Admin & Roles
@@ -180,6 +180,28 @@ opened Purchase Return from that modal and returned 6 of 20 units; confirmed sto
 the ₹480 refund amount, and reopening the return form afterward correctly showed 6 already
 returned / 14 still returnable (the cap holds across repeat visits, not just within one session).
 
+## Module 7 detail
+Added `apiSaveBulkPayment` (Code.gs): one atomic `withLock_` call that writes several
+`Payments` rows at once — one per document allocation, plus one more for any leftover kept
+"on account" (no `refId`). Deliberately reuses the existing flat `Payments` schema rather than
+adding a new "batch" concept, so every existing calculation that sums by `refId` (`paidByRef`,
+ledgers, Outstanding report) needed zero new code to understand bulk-entered payments.
+New `BulkPaymentPage` (Index.html): pick a direction (Receive from customer / Pay out to
+supplier), pick the party, and its open invoices/bills (same `due = total − paidByRef` calc as
+the existing single-payment `PaymentModal`) list out oldest-first. Entering a total amount
+auto-allocates oldest-first up to each document's due automatically; any per-line amount can
+still be hand-edited afterward (capped at that line's own due), and anything left over once
+every open document is covered is shown live as "On account" and saved as its own Payments row
+rather than silently discarded. Reachable from a new "Bulk Payment" nav item (MAIN section) and
+a matching button on the Payments page header.
+Verified live in a headless Chromium browser: seeded a customer with two open invoices
+(₹300 and ₹700, oldest first), entered a single total of ₹1,200 on the Bulk Payment page,
+confirmed auto-allocation split it 300/700 with ₹200 correctly left "on account", saved, and
+confirmed three separate Payments rows were written (300 against BP-OLD, 700 against BP-NEW,
+200 on account) — then confirmed the Outstanding report shows "Nothing outstanding — all
+invoices paid!", proving the allocation actually clears the receivable through the normal
+paidByRef path with no special-casing needed.
+
 ## Notes
 - Testing method: mock mode only (localStorage mockServer, IS_GAS=false), verified by opening
   Index.html directly in a browser (Playwright/Chromium) — no Google login is available in this
@@ -192,21 +214,21 @@ returned / 14 still returnable (the cap holds across repeat visits, not just wit
   later polish pass rather than fixed now since it touches balance-label wording used everywhere,
   not just the Purchase Suite.
 
-## STATUS AS OF 2026-07-04 — resume from Module 7
+## STATUS AS OF 2026-07-04 — resume from Module 8
 
-**Fully done, verified, committed:** Modules 0–6 (dark re-theme, keyboard core, CRM depth, opening
+**Fully done, verified, committed:** Modules 0–7 (dark re-theme, keyboard core, CRM depth, opening
 balances, full Quotation→Sales Order→Invoice→Sales Return suite, dispatch tracking + cash/credit
-risk alert, and now the full Purchase Suite with Purchase Return). Each was checked by actually
-running the app in a headless Chromium browser against the mock server, not just read for
-correctness — Module 6's verification covered the full create→search→return→re-cap round trip,
-confirming stock and supplier-balance math both reverse correctly relative to Sales Return.
+risk alert, full Purchase Suite with Purchase Return, and now Bulk Payment Entry). Each was checked
+by actually running the app in a headless Chromium browser against the mock server, not just read
+for correctness — Module 7's verification confirmed auto-allocation, on-account overflow, and the
+Outstanding report all agree after a real bulk save.
 
-**Not started: Modules 7–12.** Bulk Payment Entry, Categories/Brands/Stock Ledger, Follow-up CRM,
-Admin/Roles, Reports/Charts/Export, and the final QA pass remain. Stopping at a clean module
-boundary, with everything so far genuinely finished and tested, is the honest choice over rushing
-several large modules at once.
+**Not started: Modules 8–12.** Categories/Brands/Stock Ledger, Follow-up CRM, Admin/Roles,
+Reports/Charts/Export, and the final QA pass remain. Stopping at a clean module boundary, with
+everything so far genuinely finished and tested, is the honest choice over rushing several large
+modules at once.
 
 **To resume:** open a new session against this same branch/repo, tell Claude "read PROGRESS.md,
-resume from Module 7," and it starts on Bulk Payment Entry (a screen to record one payment against
-multiple open invoices/purchases/opening-balances at once, likely oldest-first auto-allocation with
-manual override, writing one Payments row per allocation).
+resume from Module 8," and it starts on Products/Categories/Brands + a Stock Ledger report (a
+per-item running-balance view of every stock movement — purchases, invoices, sales/purchase
+returns — across the modules already built).
