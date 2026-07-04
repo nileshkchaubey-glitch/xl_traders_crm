@@ -122,6 +122,11 @@ function gs(fn, ...args) {
   return mockServer(fn, args);
 }
 const MOCK_KEY = "xl_erp_mock_v1";
+// Local preview has no real Google login, so we stand in one fixed identity for
+// Session.getActiveUser().getEmail() — good enough to exercise the Owner/Staff gating
+// logic; the Settings page below adds a preview-only "view as" toggle purely so this can
+// be demoed/tested without needing a second Google account.
+const MOCK_CURRENT_EMAIL = "you@local.preview";
 function mockDB() {
   const raw = localStorage.getItem(MOCK_KEY);
   if (raw) {
@@ -137,6 +142,7 @@ function mockDB() {
     dispatchLog: [],
     purchaseReturns: [], purchaseReturnItems: [],
     followups: [],
+    users: [],
     counters: { INV: 0, PUR: 0, QUO: 0, SO: 0, SR: 0, PR: 0 }
   };
 }
@@ -192,12 +198,19 @@ async function mockServer(fn, args) {
       if (!db.purchaseReturns) db.purchaseReturns = [];
       if (!db.purchaseReturnItems) db.purchaseReturnItems = [];
       if (!db.followups) db.followups = [];
+      if (!db.users) db.users = [];
+      if (db.users.length === 0) {
+        db.users.push({ id: uid(), email: MOCK_CURRENT_EMAIL, name: "", role: "Owner", active: true });
+      }
       if (!db.counters.PR) db.counters.PR = 0;
       if (!db.counters.QUO) db.counters.QUO = 0;
       if (!db.counters.SO) db.counters.SO = 0;
       if (!db.counters.SR) db.counters.SR = 0;
+      mockSave(db);
+      const me = db.users.find((u) => u.email === MOCK_CURRENT_EMAIL && u.active !== false);
+      const currentUser = { email: MOCK_CURRENT_EMAIL, role: me ? me.role : "Staff" };
       const { counters, ...rest } = db;
-      return { ...rest, settings: { ...MOCK_DEFAULT_SETTINGS, ...db.settings } };
+      return { ...rest, settings: { ...MOCK_DEFAULT_SETTINGS, ...db.settings }, currentUser };
     }
     case "apiSaveInvoice": {
       const p = parse(args[0]);
@@ -344,6 +357,26 @@ async function mockServer(fn, args) {
       db.followups = db.followups.filter((x) => x.id !== args[0]);
       mockSave(db);
       return { ok: true };
+    case "apiSaveUser": {
+      const u = parse(args[0]);
+      if (u.id && (u.role !== "Owner" || u.active === false)) {
+        const others = db.users.filter((x) => x.id !== u.id && x.role === "Owner" && x.active !== false);
+        if (others.length === 0) throw new Error("At least one active Owner must remain.");
+      }
+      if (!u.id) u.id = uid();
+      const i = db.users.findIndex((x) => x.id === u.id);
+      i >= 0 ? db.users[i] = u : db.users.push(u);
+      mockSave(db);
+      return { ok: true, record: u };
+    }
+    case "apiDeleteUser": {
+      const id = args[0];
+      const others = db.users.filter((x) => x.id !== id && x.role === "Owner" && x.active !== false);
+      if (others.length === 0) throw new Error("At least one active Owner must remain.");
+      db.users = db.users.filter((x) => x.id !== id);
+      mockSave(db);
+      return { ok: true };
+    }
     case "apiMarkConverted": {
       const p = parse(args[0]);
       const list = p.sheet === "Quotations" ? db.quotations : db.salesOrders;
@@ -794,7 +827,7 @@ function ShortcutSheet({ onClose }) {
 }
 
 /** Ctrl+K global search across pages, parties, items and recent invoices. */
-function CommandPalette({ db, go, onClose }) {
+function CommandPalette({ db, go, isOwner, onClose }) {
   const [q, setQ] = useState("");
   const [hi, setHi] = useState(0);
   const inputRef = useRef(null);
@@ -807,7 +840,7 @@ function CommandPalette({ db, go, onClose }) {
   const results = useMemo(() => {
     const s = clamp(q);
     const out = [];
-    NAV.flatMap((sec) => sec.items).forEach((it) => {
+    NAV.flatMap((sec) => sec.items).filter((it) => !it.ownerOnly || isOwner).forEach((it) => {
       if (!s || clamp(it.label).includes(s)) out.push({ type: "Page", icon: it.icon, label: it.label, action: () => go(it.id) });
     });
     if (s) {
@@ -816,7 +849,7 @@ function CommandPalette({ db, go, onClose }) {
       db.invoices.filter((inv) => clamp(inv.invNo).includes(s) || clamp(inv.partyName).includes(s)).slice(0, 5).forEach((inv) => out.push({ type: "Invoice", icon: "\u{1F9FE}", label: `${inv.invNo} — ${inv.partyName}`, action: () => go("sales") }));
     }
     return out.slice(0, 20);
-  }, [q, db, go]);
+  }, [q, db, go, isOwner]);
   useEffect(() => setHi(0), [q]);
   const activate = (r) => { if (r) { r.action(); onClose(); } };
   const keydown = (e) => {
@@ -859,11 +892,12 @@ const NAV = [
     { id: "parties", icon: "\u{1F465}", label: "Parties" }
   ] },
   { sec: "SETUP", items: [
-    { id: "opening-bills", icon: "\u{1F4DC}", label: "Opening Bills" }
+    { id: "opening-bills", icon: "\u{1F4DC}", label: "Opening Bills" },
+    { id: "admin", icon: "\u{1F510}", label: "Admin & Roles", ownerOnly: true }
   ] },
   { sec: "INSIGHTS", items: [
     { id: "reports", icon: "\u{1F4CA}", label: "Reports" },
-    { id: "settings", icon: "\u2699\uFE0F", label: "Settings" }
+    { id: "settings", icon: "\u2699\uFE0F", label: "Settings", ownerOnly: true }
   ] }
 ];
 const MOBILE_NAV = ["dashboard", "new-sale", "sales", "items", "reports"];
@@ -1046,6 +1080,24 @@ function App() {
       });
       await gs("apiDeleteFollowup", id);
       toast("Follow-up deleted");
+    },
+    saveUser: async (u) => {
+      const res = await gs("apiSaveUser", JSON.stringify(u));
+      mutate((d) => {
+        const i = d.users.findIndex((x) => x.id === res.record.id);
+        i >= 0 ? d.users[i] = res.record : d.users.push(res.record);
+        return d;
+      });
+      toast("User saved");
+      return res.record;
+    },
+    deleteUser: async (id) => {
+      mutate((d) => {
+        d.users = d.users.filter((x) => x.id !== id);
+        return d;
+      });
+      await gs("apiDeleteUser", id);
+      toast("User removed");
     },
     saveQuotation: async (payload) => {
       const res = await gs("apiSaveQuotation", JSON.stringify(payload));
@@ -1337,7 +1389,8 @@ function App() {
     load();
   } }, "Retry")));
   if (!db || !derived) return /* @__PURE__ */ React.createElement("div", { className: "min-h-screen flex flex-col items-center justify-center gap-3" }, /* @__PURE__ */ React.createElement("div", { className: "w-12 h-12 rounded-2xl bg-red-600 text-white flex items-center justify-center font-extrabold text-lg shadow-lg" }, "XL"), /* @__PURE__ */ React.createElement("div", { className: "text-sm text-zinc-400 font-medium animate-pulse" }, "Loading your business data\u2026"));
-  const ctx = { db, derived, actions, go, S: db.settings };
+  const isOwner = db.currentUser && db.currentUser.role === "Owner";
+  const ctx = { db, derived, actions, go, S: db.settings, isOwner };
   const pages = {
     "dashboard": /* @__PURE__ */ React.createElement(Dashboard, { ...ctx }),
     "new-sale": /* @__PURE__ */ React.createElement(NewSale, { ...ctx, ...pageProps, key: pageProps.editId || pageProps.convertFrom && pageProps.convertFrom.id || "new" }),
@@ -1360,21 +1413,25 @@ function App() {
     "sales-returns": /* @__PURE__ */ React.createElement(SalesReturnsList, { ...ctx }),
     "new-sales-return": /* @__PURE__ */ React.createElement(NewSalesReturn, { ...ctx, ...pageProps, key: pageProps.invoiceId || "new-sr" }),
     "reports": /* @__PURE__ */ React.createElement(ReportsPage, { ...ctx }),
-    "settings": /* @__PURE__ */ React.createElement(SettingsPage, { ...ctx })
+    "settings": /* @__PURE__ */ React.createElement(SettingsPage, { ...ctx }),
+    "admin": /* @__PURE__ */ React.createElement(AdminPage, { ...ctx })
   };
-  return /* @__PURE__ */ React.createElement("div", { className: "min-h-screen bg-zinc-950" }, /* @__PURE__ */ React.createElement("aside", { className: `fixed inset-y-0 left-0 w-60 bg-zinc-900 border-r border-zinc-800 z-[300] transform transition-transform md:translate-x-0 ${menuOpen ? "translate-x-0" : "-translate-x-full"}` }, /* @__PURE__ */ React.createElement("div", { className: "px-4 py-4 border-b border-zinc-800 flex items-center gap-3" }, /* @__PURE__ */ React.createElement("div", { className: "w-10 h-10 rounded-xl bg-red-600 text-white flex items-center justify-center font-extrabold shadow" }, "XL"), /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("div", { className: "font-extrabold text-zinc-100 leading-tight" }, db.settings.bizName), /* @__PURE__ */ React.createElement("div", { className: "text-[10px] text-zinc-500 font-medium" }, "ERP \xB7 ", IS_GAS ? "Google Sheets" : "Local preview"))), /* @__PURE__ */ React.createElement("nav", { className: "py-2 overflow-y-auto" }, NAV.map((sec) => /* @__PURE__ */ React.createElement("div", { key: sec.sec, className: "mb-1" }, /* @__PURE__ */ React.createElement("div", { className: "px-4 pt-3 pb-1 text-[10px] font-bold tracking-widest text-zinc-600" }, sec.sec), sec.items.map((it) => /* @__PURE__ */ React.createElement(
-    "button",
-    {
-      key: it.id,
-      onClick: () => go(it.id),
-      className: `w-full flex items-center gap-2.5 px-4 py-2 text-[13px] font-medium border-l-[3px] transition ${page === it.id ? "border-red-500 bg-red-950/40 text-red-400" : "border-transparent text-zinc-400 hover:bg-zinc-800/60"}`
-    },
-    /* @__PURE__ */ React.createElement("span", { className: "w-5 text-center" }, it.icon),
-    it.label
-  )))))), menuOpen && /* @__PURE__ */ React.createElement("div", { className: "fixed inset-0 bg-black/60 z-[290] md:hidden", onClick: () => setMenuOpen(false) }), /* @__PURE__ */ React.createElement("main", { className: "md:ml-60 pb-20 md:pb-8" }, /* @__PURE__ */ React.createElement("div", { className: "md:hidden sticky top-0 z-[200] bg-zinc-900 border-b border-zinc-800 px-4 py-3 flex items-center justify-between" }, /* @__PURE__ */ React.createElement("button", { onClick: () => setMenuOpen(true), className: "text-xl text-zinc-100" }, "\u2630"), /* @__PURE__ */ React.createElement("div", { className: "font-extrabold text-zinc-100" }, db.settings.bizName), /* @__PURE__ */ React.createElement("button", { onClick: () => go("new-sale"), className: "w-8 h-8 rounded-lg bg-red-600 text-white font-bold" }, "+")), /* @__PURE__ */ React.createElement("div", { className: "p-4 md:p-6 max-w-6xl mx-auto" }, pages[page])), /* @__PURE__ */ React.createElement("nav", { className: "md:hidden fixed bottom-0 inset-x-0 bg-zinc-900 border-t border-zinc-800 z-[250] grid grid-cols-5" }, MOBILE_NAV.map((id) => {
+  return /* @__PURE__ */ React.createElement("div", { className: "min-h-screen bg-zinc-950" }, /* @__PURE__ */ React.createElement("aside", { className: `fixed inset-y-0 left-0 w-60 bg-zinc-900 border-r border-zinc-800 z-[300] transform transition-transform md:translate-x-0 ${menuOpen ? "translate-x-0" : "-translate-x-full"}` }, /* @__PURE__ */ React.createElement("div", { className: "px-4 py-4 border-b border-zinc-800 flex items-center gap-3" }, /* @__PURE__ */ React.createElement("div", { className: "w-10 h-10 rounded-xl bg-red-600 text-white flex items-center justify-center font-extrabold shadow" }, "XL"), /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("div", { className: "font-extrabold text-zinc-100 leading-tight" }, db.settings.bizName), /* @__PURE__ */ React.createElement("div", { className: "text-[10px] text-zinc-500 font-medium" }, "ERP \xB7 ", IS_GAS ? "Google Sheets" : "Local preview"))), /* @__PURE__ */ React.createElement("nav", { className: "py-2 overflow-y-auto" }, NAV.map((sec) => {
+    const visItems = sec.items.filter((it) => !it.ownerOnly || isOwner);
+    return visItems.length === 0 ? null : /* @__PURE__ */ React.createElement("div", { key: sec.sec, className: "mb-1" }, /* @__PURE__ */ React.createElement("div", { className: "px-4 pt-3 pb-1 text-[10px] font-bold tracking-widest text-zinc-600" }, sec.sec), visItems.map((it) => /* @__PURE__ */ React.createElement(
+      "button",
+      {
+        key: it.id,
+        onClick: () => go(it.id),
+        className: `w-full flex items-center gap-2.5 px-4 py-2 text-[13px] font-medium border-l-[3px] transition ${page === it.id ? "border-red-500 bg-red-950/40 text-red-400" : "border-transparent text-zinc-400 hover:bg-zinc-800/60"}`
+      },
+      /* @__PURE__ */ React.createElement("span", { className: "w-5 text-center" }, it.icon),
+      it.label
+    )));
+  }), /* @__PURE__ */ React.createElement("div", { className: "mt-4 mx-4 pt-3 border-t border-zinc-800 text-[11px] text-zinc-500" }, /* @__PURE__ */ React.createElement("div", { className: "truncate", title: db.currentUser && db.currentUser.email }, db.currentUser && db.currentUser.email), /* @__PURE__ */ React.createElement("span", { className: `inline-block mt-1 px-2 py-0.5 rounded-full text-[10px] font-bold ${isOwner ? "bg-red-950/50 text-red-400" : "bg-zinc-800 text-zinc-400"}` }, db.currentUser && db.currentUser.role)))), menuOpen && /* @__PURE__ */ React.createElement("div", { className: "fixed inset-0 bg-black/60 z-[290] md:hidden", onClick: () => setMenuOpen(false) }), /* @__PURE__ */ React.createElement("main", { className: "md:ml-60 pb-20 md:pb-8" }, /* @__PURE__ */ React.createElement("div", { className: "md:hidden sticky top-0 z-[200] bg-zinc-900 border-b border-zinc-800 px-4 py-3 flex items-center justify-between" }, /* @__PURE__ */ React.createElement("button", { onClick: () => setMenuOpen(true), className: "text-xl text-zinc-100" }, "\u2630"), /* @__PURE__ */ React.createElement("div", { className: "font-extrabold text-zinc-100" }, db.settings.bizName), /* @__PURE__ */ React.createElement("button", { onClick: () => go("new-sale"), className: "w-8 h-8 rounded-lg bg-red-600 text-white font-bold" }, "+")), /* @__PURE__ */ React.createElement("div", { className: "p-4 md:p-6 max-w-6xl mx-auto" }, pages[page])), /* @__PURE__ */ React.createElement("nav", { className: "md:hidden fixed bottom-0 inset-x-0 bg-zinc-900 border-t border-zinc-800 z-[250] grid grid-cols-5" }, MOBILE_NAV.map((id) => {
     const it = NAV.flatMap((s) => s.items).find((x) => x.id === id);
     return /* @__PURE__ */ React.createElement("button", { key: id, onClick: () => go(id), className: `py-2 flex flex-col items-center gap-0.5 text-[10px] font-semibold ${page === id ? "text-red-400" : "text-zinc-500"}` }, /* @__PURE__ */ React.createElement("span", { className: "text-base" }, it.icon), it.label.split(" ")[0]);
-  })), /* @__PURE__ */ React.createElement(ToastHost, null), paletteOpen && /* @__PURE__ */ React.createElement(CommandPalette, { db, go, onClose: () => setPaletteOpen(false) }), shortcutsOpen && /* @__PURE__ */ React.createElement(ShortcutSheet, { onClose: () => setShortcutsOpen(false) }));
+  })), /* @__PURE__ */ React.createElement(ToastHost, null), paletteOpen && /* @__PURE__ */ React.createElement(CommandPalette, { db, go, isOwner, onClose: () => setPaletteOpen(false) }), shortcutsOpen && /* @__PURE__ */ React.createElement(ShortcutSheet, { onClose: () => setShortcutsOpen(false) }));
 }
 function PageHead({ title, sub, right }) {
   return /* @__PURE__ */ React.createElement("div", { className: "flex flex-wrap items-center justify-between gap-3 mb-4" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("h1", { className: "text-lg md:text-xl font-extrabold text-zinc-100" }, title), sub && /* @__PURE__ */ React.createElement("p", { className: "text-xs text-zinc-500 mt-0.5" }, sub)), /* @__PURE__ */ React.createElement("div", { className: "flex gap-2 flex-wrap" }, right));
@@ -2772,11 +2829,67 @@ function OutstandingReport({ db, derived, cur }) {
   rows.forEach((r) => buckets[bucket(r.days)] += r.due);
   return /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("div", { className: "grid grid-cols-2 md:grid-cols-4 gap-3 mb-4" }, Object.entries(buckets).map(([b, v]) => /* @__PURE__ */ React.createElement(StatCard, { key: b, label: `${b} days`, value: fmt(v, cur), tone: b === "60+" ? "red" : b === "31\u201360" ? "amber" : "ink" }))), rows.length === 0 ? /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800" }, /* @__PURE__ */ React.createElement(Empty, { icon: "\u2705", msg: "Nothing outstanding \u2014 all invoices paid!" })) : /* @__PURE__ */ React.createElement(Table, { head: ["Invoice", "Date", "Party", { t: "Days", right: true }, { t: "Total", right: true }, { t: "Due", right: true }, "Age"] }, rows.map((i) => /* @__PURE__ */ React.createElement("tr", { key: i.id }, /* @__PURE__ */ React.createElement(Td, { className: "font-semibold" }, i.label), /* @__PURE__ */ React.createElement(Td, { className: "text-zinc-400 whitespace-nowrap" }, fdate(i.date)), /* @__PURE__ */ React.createElement(Td, null, i.partyName), /* @__PURE__ */ React.createElement(Td, { right: true }, i.days), /* @__PURE__ */ React.createElement(Td, { right: true }, fmt(i.total, cur)), /* @__PURE__ */ React.createElement(Td, { right: true, className: "font-bold text-amber-400" }, fmt(i.due, cur)), /* @__PURE__ */ React.createElement(Td, null, /* @__PURE__ */ React.createElement("span", { className: `px-2 py-0.5 rounded-full text-[10px] font-bold ${i.days > 60 ? "bg-red-950/50 text-red-400" : i.days > 30 ? "bg-amber-950/50 text-amber-400" : "bg-zinc-800 text-zinc-400"}` }, bucket(i.days)))))));
 }
-function SettingsPage({ db, actions, S }) {
+/**
+ * Admin & Roles (Module 10). Deliberately just two roles (Owner/Staff) and a flat list —
+ * a small trading business doesn't need a permissions matrix. This is a workflow layer,
+ * not a security boundary: anyone with edit access to the underlying Google Sheet can
+ * already open the Apps Script editor and read/change anything, same as any script bound
+ * to a Sheet. What it actually buys: the Owner decides who sees Settings/Admin in the UI,
+ * using the real identity Session.getActiveUser() already gives Apps Script for free — no
+ * separate login system to build. apiSaveUser/apiDeleteUser re-check Owner-ness server
+ * side too (see requireOwner_ in Code.gs), so this page's own gating below is
+ * belt-and-suspenders, not the only thing stopping a Staff account from editing roles.
+ */
+function AdminPage({ db, actions, isOwner }) {
+  const [email, setEmail] = useState("");
+  const [confirm, setConfirm] = useState(null);
+  const owners = db.users.filter((u) => u.role === "Owner" && u.active !== false);
+  if (!isOwner) {
+    return /* @__PURE__ */ React.createElement("div", { className: "anim-in" }, /* @__PURE__ */ React.createElement(PageHead, { title: "Admin & Roles" }), /* @__PURE__ */ React.createElement(Empty, { icon: "\u{1F512}", msg: "Only an Owner can manage users and roles." }));
+  }
+  const addUser = async () => {
+    if (!email.trim()) {
+      toast("Enter an email", "warn");
+      return;
+    }
+    if (db.users.some((u) => clamp(u.email) === clamp(email))) {
+      toast("That email is already listed", "warn");
+      return;
+    }
+    try {
+      await actions.saveUser({ id: "", email: email.trim(), name: "", role: "Staff", active: true });
+      setEmail("");
+    } catch (e) {
+      toast("Save failed: " + (e.message || e), "err");
+    }
+  };
+  const setRole = async (u, role) => {
+    try {
+      await actions.saveUser({ ...u, role });
+    } catch (e) {
+      toast("Save failed: " + (e.message || e), "err");
+    }
+  };
+  const toggleActive = async (u) => {
+    try {
+      await actions.saveUser({ ...u, active: !u.active });
+    } catch (e) {
+      toast("Save failed: " + (e.message || e), "err");
+    }
+  };
+  return /* @__PURE__ */ React.createElement("div", { className: "anim-in" }, /* @__PURE__ */ React.createElement(PageHead, { title: "Admin & Roles", sub: "Who sees Settings and this screen — not a login system; Sheet sharing is still the real access control." }), /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800 p-4 mb-4 max-w-lg" }, /* @__PURE__ */ React.createElement("h3", { className: "text-xs font-bold uppercase tracking-wide text-zinc-500 mb-3" }, "Add a user"), /* @__PURE__ */ React.createElement("div", { className: "flex gap-2" }, /* @__PURE__ */ React.createElement(Input, { value: email, onChange: (e) => setEmail(e.target.value), placeholder: "name@company.com", className: "flex-1" }), /* @__PURE__ */ React.createElement(Btn, { kind: "brand", onClick: addUser }, "+ Add as Staff")), /* @__PURE__ */ React.createElement("p", { className: "text-[11px] text-zinc-500 mt-2" }, "They must already have edit access to this Google Sheet — this just decides what they see once they open the app.")), /* @__PURE__ */ React.createElement(Table, { head: ["Email", "Role", "Status", ""] }, db.users.map((u) => {
+    const isLastOwner = u.role === "Owner" && u.active !== false && owners.length <= 1;
+    return /* @__PURE__ */ React.createElement("tr", { key: u.id }, /* @__PURE__ */ React.createElement(Td, { className: "font-semibold" }, u.email, u.email === db.currentUser.email && /* @__PURE__ */ React.createElement("span", { className: "ml-2 text-[10px] text-zinc-500" }, "(you)")), /* @__PURE__ */ React.createElement(Td, null, /* @__PURE__ */ React.createElement(Select, { value: u.role, disabled: isLastOwner, onChange: (e) => setRole(u, e.target.value), className: "!w-auto" }, /* @__PURE__ */ React.createElement("option", null, "Owner"), /* @__PURE__ */ React.createElement("option", null, "Staff"))), /* @__PURE__ */ React.createElement(Td, null, /* @__PURE__ */ React.createElement("span", { className: `px-2 py-0.5 rounded-full text-[10px] font-bold ${u.active !== false ? "bg-emerald-950/50 text-emerald-400" : "bg-zinc-800 text-zinc-400"}` }, u.active !== false ? "ACTIVE" : "INACTIVE")), /* @__PURE__ */ React.createElement(Td, null, /* @__PURE__ */ React.createElement("div", { className: "flex gap-1 justify-end" }, /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "xs", disabled: isLastOwner, onClick: () => toggleActive(u) }, u.active !== false ? "Deactivate" : "Reactivate"), /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "xs", className: "!text-red-400", disabled: isLastOwner, onClick: () => setConfirm(u) }, "\u{1F5D1}"))));
+  })), confirm && /* @__PURE__ */ React.createElement(Confirm, { msg: `Remove ${confirm.email}? They'll lose access to Settings/Admin (their Sheet access is unaffected).`, onYes: () => actions.deleteUser(confirm.id), onClose: () => setConfirm(null) }));
+}
+function SettingsPage({ db, actions, S, isOwner }) {
   const [f, setF] = useState({ ...S });
   const [unitsText, setUnitsText] = useState((S.units || []).join(", "));
   const [modesText, setModesText] = useState((S.payModes || []).join(", "));
   const set = (k, v) => setF((x) => ({ ...x, [k]: v }));
+  if (!isOwner) {
+    return /* @__PURE__ */ React.createElement("div", { className: "anim-in" }, /* @__PURE__ */ React.createElement(PageHead, { title: "Settings" }), /* @__PURE__ */ React.createElement(Empty, { icon: "\u{1F512}", msg: "Only an Owner can view Settings. Ask an Owner to change this for you." }));
+  }
   const save = () => {
     const clean = {
       ...f,

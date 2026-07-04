@@ -19,7 +19,7 @@ Resume rule: read this file, find the first module NOT marked `[DONE]`, start th
 - [DONE] Module 7 — Bulk Payment Entry — 2026-07-04
 - [DONE] Module 8 — Products, Categories, Brands, Stock Ledger — 2026-07-04
 - [DONE] Module 9 — Follow-up CRM — 2026-07-04
-- [ ] Module 10 — Admin & Roles
+- [DONE] Module 10 — Admin & Roles — 2026-07-04
 - [ ] Module 11 — Reports completion, Charts, Export
 - [ ] Module 12 — Final QA pass
 
@@ -277,24 +277,65 @@ badge.
   later polish pass rather than fixed now since it touches balance-label wording used everywhere,
   not just the Purchase Suite.
 
-## STATUS AS OF 2026-07-04 — resume from Module 10
+## Module 10 detail
+**Scope decision made explicit (read this before touching roles again):** this app has no separate
+login system, and deliberately doesn't get one. It's a Google Sheet-bound Apps Script web app —
+real access control is Google Sheet sharing, which exists entirely outside this codebase. Anyone
+with edit access to the Sheet can already open the Apps Script editor and read/change anything
+here, same as any other bound script. So "Admin & Roles" is a **workflow permission layer**, not a
+security boundary: it decides what someone sees in the UI once they're already in, using the real
+identity Apps Script gives for free (`Session.getActiveUser().getEmail()`) — no passwords, no
+separate user table to keep in sync with Sheet sharing. This is stated in a comment at the top of
+both the `Users` schema block (Code.gs) and `AdminPage` (Index.html) so it isn't misread later as
+"real" auth.
+Added a `Users` sheet (`id, email, name, role, active`; role is just `'Owner'` or `'Staff'` — two
+roles is enough for a small trading business, not a permissions matrix). `bootstrap()` now
+auto-grants the very first person who ever opens the app as Owner (otherwise nobody could reach
+Admin to grant the first role), computes `currentUser` from their real email, and defaults any
+email not found in `Users` to `'Staff'` (least privilege for unrecognized accounts, not an outright
+block — they already have Sheet access, silently locking them out of the UI would just confuse,
+not protect, anyone). `apiSaveUser`/`apiDeleteUser` are Owner-only, enforced **server-side** via a
+new `requireOwner_()` check — the client-side nav/route gating below is not the only thing
+stopping a Staff account from editing roles. Both also refuse to demote/deactivate/delete the last
+remaining active Owner, so nobody can lock everyone out of Admin by mistake.
+Frontend: NAV items for `settings` and the new `admin` page carry an `ownerOnly` flag, filtered out
+of the sidebar, the command palette's results, for Staff accounts (defense in depth: both
+`SettingsPage` and the new `AdminPage` also self-check `isOwner` and render an "Access restricted"
+message if somehow reached anyway). A small sidebar footer now shows the signed-in email and a
+role badge, so it's always visible who you are and what you can do. `AdminPage` itself: add a user
+by email (defaults to Staff), change role via a dropdown, deactivate/reactivate, delete — with the
+last-Owner controls visibly disabled (not just server-rejected) so the guard rarely has to fire in
+practice.
+**Explicitly out of scope for this module** (a deliberate cut, not an oversight): gating individual
+delete buttons across every list page (Items, Parties, Purchases, etc.) to Owner-only. That's 15+
+call sites: a real feature, but disproportionate to add and verify correctly in this pass. Settings
++ the Admin screen itself were judged the two highest-value gates (where business config and role
+assignment itself live); broader "hide delete everywhere" is a natural, cleanly-scoped follow-up.
+Verified live in a headless Chromium browser: first load auto-became Owner (sidebar footer +
+Admin/Settings both visible); added a Staff user from Admin, confirmed the sole Owner's own
+role-dropdown and Deactivate/Delete controls were disabled (last-Owner guard); promoted the new
+user to Owner and confirmed both rows' controls unlocked with two Owners present; then simulated a
+Staff-only session (reseeded the mock identity as the Staff account) and confirmed Admin & Roles
+and Settings both disappeared from the sidebar, and the command palette returned "No matches" for
+a "Settings" search — the gating holds across all three surfaces (nav, direct route, palette).
 
-**Fully done, verified, committed:** Modules 0–9 (dark re-theme, keyboard core, CRM depth, opening
+## STATUS AS OF 2026-07-04 — resume from Module 11
+
+**Fully done, verified, committed:** Modules 0–10 (dark re-theme, keyboard core, CRM depth, opening
 balances, full Quotation→Sales Order→Invoice→Sales Return suite, dispatch tracking + cash/credit
 risk alert, full Purchase Suite with Purchase Return, Bulk Payment Entry, Category/Brand filters +
-Stock Ledger, and now Follow-up CRM). Each was checked by actually running the app in a headless
-Chromium browser against the mock server, not just read for correctness — Module 9's verification
-covered the full add→appear-on-dashboard→mark-done→reopen round trip.
+Stock Ledger, Follow-up CRM, and now Admin & Roles). Each was checked by actually running the app
+in a headless Chromium browser against the mock server, not just read for correctness — Module
+10's verification specifically simulated both an Owner and a Staff session to confirm the role
+gating actually holds, not just that the Owner path works.
 
-**Not started: Modules 10–12.** Admin/Roles, Reports/Charts/Export, and the final QA pass remain.
+**Not started: Modules 11–12.** Reports completion/Charts/Export and the final QA pass remain.
 Stopping at a clean module boundary, with everything so far genuinely finished and tested, is the
-honest choice over rushing several large modules at once.
+honest choice over rushing the last stretch.
 
 **To resume:** open a new session against this same branch/repo, tell Claude "read PROGRESS.md,
-resume from Module 10," and it starts on Admin & Roles (the spec text itself should be checked for
-the exact shape since it wasn't retained verbatim in this file — likely a user-role concept,
-e.g. Owner vs Staff, gating destructive actions like deletes/settings behind a role check; this
-app currently has no auth/login concept at all, so the scope of "roles" needs deciding first: a
-simple client-side role toggle stored in Settings for now, versus real per-user auth, which would
-be a much larger undertaking than anything built so far and may need explicit user confirmation
-on approach before implementation).
+resume from Module 11," and it starts on Reports completion (the existing Reports page already has
+P&L/Sales/Purchase/Party Ledger/Stock/Outstanding tabs with real data — this module is about
+finishing whatever's incomplete there, likely: chart/graph visualizations of the existing report
+data, and a CSV/export mechanism per report tab, building on the "Export all data (CSV)" button
+that already exists on the Settings page for the whole database).

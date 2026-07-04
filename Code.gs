@@ -48,6 +48,14 @@ var SCHEMA = {
   // free-text Parties.notes field, so overdue/due-today items can be queried and
   // surfaced (Dashboard, a cross-party worklist) instead of living in unstructured text.
   Followups: ['id','partyId','partyName','dueDate','note','status','createdAt','completedAt'],
+  // ---- Admin & Roles (Module 10). NOTE: this is a workflow permission layer, not a
+  // security boundary — anyone with edit access to the underlying Google Sheet can already
+  // read/change this sheet directly or open the Apps Script editor, same as any other
+  // sheet-bound script. Real access control is Google Sheet sharing, which lives outside
+  // this app entirely. What this DOES do: let the Owner decide who sees Settings/Admin in
+  // the UI, using the real identity Apps Script already gives us for free
+  // (Session.getActiveUser()) — no separate login system to build or maintain.
+  Users: ['id','email','name','role','active'],
   Settings: ['key','value'],
   Counters: ['key','value']
 };
@@ -260,6 +268,15 @@ function withLock_(fn) {
   finally { lock.releaseLock(); }
 }
 
+/** Throws unless the caller is an active Owner — server-side check for the Admin & Roles
+ * screen so the UI-level nav gating on the client is never the only thing standing
+ * between a Staff account and the Users sheet. */
+function requireOwner_() {
+  var myEmail = Session.getActiveUser().getEmail();
+  var me = readAll_('Users').find(function(u) { return u.email === myEmail && u.active !== false; });
+  if (!me || me.role !== 'Owner') throw new Error('Only an Owner can do this.');
+}
+
 // ================= PUBLIC API (called via google.script.run) =================
 
 /** ONE call that loads the entire database for the client. */
@@ -275,8 +292,23 @@ function bootstrap() {
       } catch (e) { /* keep defaults on parse failure */ }
     }
   }
+  var users = readAll_('Users');
+  var myEmail = Session.getActiveUser().getEmail();
+  // First person to ever open the app becomes Owner automatically — otherwise nobody
+  // could ever reach the Admin screen to grant the first role.
+  if (users.length === 0) {
+    var owner = upsert_('Users', { email: myEmail, name: '', role: 'Owner', active: true });
+    users = [owner];
+  }
+  var me = users.find(function(u) { return u.email === myEmail && u.active !== false; });
+  // Unknown/inactive users default to Staff (least privilege) rather than being blocked
+  // outright — they already have edit access to the underlying Sheet via Google sharing,
+  // so silently locking them out of the UI would just be confusing, not actually secure.
+  var currentUser = { email: myEmail, role: me ? me.role : 'Staff' };
   return JSON.stringify({
     settings: settings,
+    users: users,
+    currentUser: currentUser,
     items: readAll_('Items'),
     parties: readAll_('Parties'),
     partyContacts: readAll_('PartyContacts'),
@@ -503,6 +535,30 @@ function apiDeleteOpeningBalance(id) { return withLock_(function(){ deleteById_(
 // As simple as OpeningBalances above — no stock, no counters, no money impact.
 function apiSaveFollowup(json) { return withLock_(function(){ return JSON.stringify({ ok: true, record: upsert_('Followups', JSON.parse(json)) }); }); }
 function apiDeleteFollowup(id) { return withLock_(function(){ deleteById_('Followups', id); return JSON.stringify({ ok: true }); }); }
+
+// ---- Admin & Roles (Module 10) — Owner-only, enforced server-side (see requireOwner_) ----
+function apiSaveUser(json) {
+  return withLock_(function() {
+    requireOwner_();
+    var u = JSON.parse(json);
+    // Guard against demoting/deactivating the last remaining Owner — that would lock
+    // everyone out of the Admin screen with no way back in short of editing the Sheet by hand.
+    if (u.id && (u.role !== 'Owner' || u.active === false)) {
+      var others = readAll_('Users').filter(function(x) { return x.id !== u.id && x.role === 'Owner' && x.active !== false; });
+      if (others.length === 0) throw new Error('At least one active Owner must remain.');
+    }
+    return JSON.stringify({ ok: true, record: upsert_('Users', u) });
+  });
+}
+function apiDeleteUser(id) {
+  return withLock_(function() {
+    requireOwner_();
+    var others = readAll_('Users').filter(function(x) { return x.id !== id && x.role === 'Owner' && x.active !== false; });
+    if (others.length === 0) throw new Error('At least one active Owner must remain.');
+    deleteById_('Users', id);
+    return JSON.stringify({ ok: true });
+  });
+}
 
 // ================= SALES SUITE (Module 4): Quotation -> Sales Order -> Invoice -> Return =================
 
