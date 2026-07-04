@@ -11,7 +11,7 @@ Resume rule: read this file, find the first module NOT marked `[DONE]`, start th
 
 - [DONE] Module 0 — Global dark re-theme — 2026-07-04
 - [DONE] Module 1 — Keyboard core + Confirm-on-Save + Command Palette — 2026-07-04
-- [ ] Module 2 — Customer & Supplier CRM depth
+- [DONE] Module 2 — Customer & Supplier CRM depth — 2026-07-04
 - [ ] Module 3 — Opening Bills (OpeningBalances)
 - [ ] Module 4 — Sales Suite (Quotation → SO → Invoice → Return)
 - [ ] Module 5 — Dispatch Tracking + Cash/Credit Sale Type + Payment Risk Alert
@@ -57,6 +57,24 @@ shell level. Ctrl/Cmd+N jumps to New Sale from anywhere (the most common "new en
 Verified in a real browser: grid Enter-flow, Arrow-Down jumping to the same column on the next
 row, Save & New resetting the form and refocusing row 1, the command palette's live search, and
 the shortcut sheet — for both New Sale and New Purchase.
+
+## Module 2 detail
+Added `PartyContacts` sheet + CRUD (`apiSaveContact`/`apiDeleteContact`, cascade-deleted when the
+party is deleted), `category` + `visitingCardUrl` columns on `Parties`, and `apiUploadVisitingCard`
+(Drive upload — deliberately does NOT call `setSharing`, since a visiting card carries someone's
+personal name/phone; it stays private to the same Google account as the spreadsheet, not a public
+"anyone with the link" URL).
+Party rows now navigate to a full `PartyDetail` page (Profile / Ledger / Documents / Notes tabs)
+instead of opening the old edit modal — `PartyModal` is now only the quick "+ Add Party" flow,
+same pattern as quick-create in the billing grids. Extracted `buildLedgerEntries()` out of
+`LedgerReport` so the Reports tab and the new Party Detail → Ledger tab share one calculation
+instead of two copies that could drift. Added `waLink()`/`telLink()` helpers (India-first: bare
+10-digit numbers get a `91` prefix for wa.me) and wired WhatsApp/Call buttons onto each contact.
+Notes tab is a plain textarea against `party.notes` for now — it explicitly becomes the FollowUps
+timeline once Module 9 is built, not duplicated logic now that gets thrown away later.
+Verified in a real browser: create party → add contact → WhatsApp/Call icons render → Ledger tab
+(empty state) → Documents tab (upload UI) → Notes save → Category field round-trips after tab
+switch.
 
 ## Notes
 - Testing method: mock mode only (localStorage mockServer, IS_GAS=false), verified by opening

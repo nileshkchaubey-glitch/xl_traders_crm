@@ -99,6 +99,19 @@ const fdate = (d) => {
 };
 const monthKey = (d) => String(d).slice(0, 7);
 const clamp = (s) => String(s || "").toLowerCase().trim();
+// India-first phone helpers: wa.me needs a country code, most numbers saved here
+// are local 10-digit mobiles, so default the missing code to 91 rather than
+// force every user to re-type "+91" on every contact.
+const waLink = (phone) => {
+  const digits = String(phone || "").replace(/\D/g, "");
+  if (!digits) return "";
+  const withCode = digits.length === 10 ? "91" + digits : digits;
+  return `https://wa.me/${withCode}`;
+};
+const telLink = (phone) => {
+  const digits = String(phone || "").replace(/\D/g, "");
+  return digits ? `tel:${digits}` : "";
+};
 const IS_GAS = typeof google !== "undefined" && google.script && google.script.run;
 function gs(fn, ...args) {
   if (IS_GAS) {
@@ -117,7 +130,7 @@ function mockDB() {
     } catch (e) {
     }
   }
-  return { settings: null, items: [], parties: [], invoices: [], invoiceItems: [], purchases: [], purchaseItems: [], payments: [], counters: { INV: 0, PUR: 0 } };
+  return { settings: null, items: [], parties: [], partyContacts: [], invoices: [], invoiceItems: [], purchases: [], purchaseItems: [], payments: [], counters: { INV: 0, PUR: 0 } };
 }
 function mockSave(db) {
   localStorage.setItem(MOCK_KEY, JSON.stringify(db));
@@ -155,6 +168,7 @@ async function mockServer(fn, args) {
         db.settings = MOCK_DEFAULT_SETTINGS;
         mockSave(db);
       }
+      if (!db.partyContacts) db.partyContacts = [];
       const { counters, ...rest } = db;
       return { ...rest, settings: { ...MOCK_DEFAULT_SETTINGS, ...db.settings } };
     }
@@ -265,6 +279,24 @@ async function mockServer(fn, args) {
       mockSave(db);
       return { ok: true, record: r };
     }
+    case "apiSaveContact": {
+      const r = parse(args[0]);
+      if (!r.id) r.id = uid();
+      const i = db.partyContacts.findIndex((x) => x.id === r.id);
+      i >= 0 ? db.partyContacts[i] = r : db.partyContacts.push(r);
+      mockSave(db);
+      return { ok: true, record: r };
+    }
+    case "apiDeleteContact":
+      db.partyContacts = db.partyContacts.filter((x) => x.id !== args[0]);
+      mockSave(db);
+      return { ok: true };
+    case "apiUploadVisitingCard": {
+      const p = parse(args[0]);
+      // No real Drive in local preview — a data: URL stands in so the
+      // Documents tab still shows a working image immediately.
+      return { ok: true, url: `data:${p.mimeType};base64,${p.base64}` };
+    }
     case "apiSavePayment": {
       const r = parse(args[0]);
       if (!r.id) r.id = uid();
@@ -279,6 +311,7 @@ async function mockServer(fn, args) {
       return { ok: true };
     case "apiDeleteParty":
       db.parties = db.parties.filter((x) => x.id !== args[0]);
+      db.partyContacts = db.partyContacts.filter((x) => x.partyId !== args[0]);
       mockSave(db);
       return { ok: true };
     case "apiDeletePayment":
@@ -553,7 +586,7 @@ function CommandPalette({ db, go, onClose }) {
       if (!s || clamp(it.label).includes(s)) out.push({ type: "Page", icon: it.icon, label: it.label, action: () => go(it.id) });
     });
     if (s) {
-      db.parties.filter((p) => clamp(p.name).includes(s)).slice(0, 5).forEach((p) => out.push({ type: "Party", icon: "\u{1F465}", label: p.name, action: () => go("reports", { tab: "ledger", partyId: p.id }) }));
+      db.parties.filter((p) => clamp(p.name).includes(s)).slice(0, 5).forEach((p) => out.push({ type: "Party", icon: "\u{1F465}", label: p.name, action: () => go("party-detail", { partyId: p.id }) }));
       db.items.filter((i) => clamp(i.name).includes(s)).slice(0, 5).forEach((i) => out.push({ type: "Item", icon: "\u{1F3F7}️", label: i.name, action: () => go("items") }));
       db.invoices.filter((inv) => clamp(inv.invNo).includes(s) || clamp(inv.partyName).includes(s)).slice(0, 5).forEach((inv) => out.push({ type: "Invoice", icon: "\u{1F9FE}", label: `${inv.invNo} — ${inv.partyName}`, action: () => go("sales") }));
     }
@@ -695,6 +728,41 @@ function App() {
       await gs("apiDeleteParty", id);
       toast("Party deleted");
     },
+    saveContact: async (contact) => {
+      const res = await gs("apiSaveContact", JSON.stringify(contact));
+      mutate((d) => {
+        const i = d.partyContacts.findIndex((x) => x.id === res.record.id);
+        i >= 0 ? d.partyContacts[i] = res.record : d.partyContacts.push(res.record);
+        return d;
+      });
+      toast("Contact saved");
+      return res.record;
+    },
+    deleteContact: async (id) => {
+      mutate((d) => {
+        d.partyContacts = d.partyContacts.filter((x) => x.id !== id);
+        return d;
+      });
+      await gs("apiDeleteContact", id);
+      toast("Contact deleted");
+    },
+    uploadVisitingCard: async (party, file) => {
+      const base64 = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result.split(",")[1]);
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+      const res = await gs("apiUploadVisitingCard", JSON.stringify({ partyId: party.id, name: file.name, mimeType: file.type, base64 }));
+      const updated = { ...party, visitingCardUrl: res.url };
+      await gs("apiSaveParty", JSON.stringify(updated));
+      mutate((d) => {
+        const i = d.parties.findIndex((x) => x.id === party.id);
+        if (i >= 0) d.parties[i] = updated;
+        return d;
+      });
+      toast("Visiting card uploaded");
+    },
     saveInvoice: async (payload) => {
       const res = await gs("apiSaveInvoice", JSON.stringify(payload));
       mutate((d) => {
@@ -828,6 +896,7 @@ function App() {
     "purchases": /* @__PURE__ */ React.createElement(PurchaseList, { ...ctx }),
     "items": /* @__PURE__ */ React.createElement(ItemsPage, { ...ctx }),
     "parties": /* @__PURE__ */ React.createElement(PartiesPage, { ...ctx }),
+    "party-detail": /* @__PURE__ */ React.createElement(PartyDetail, { ...ctx, ...pageProps, key: pageProps.partyId || "party" }),
     "reports": /* @__PURE__ */ React.createElement(ReportsPage, { ...ctx }),
     "settings": /* @__PURE__ */ React.createElement(SettingsPage, { ...ctx })
   };
@@ -1349,10 +1418,11 @@ function PartiesPage({ db, derived, actions, go, S }) {
   }, [db.parties, q, type]);
   return /* @__PURE__ */ React.createElement("div", { className: "anim-in" }, /* @__PURE__ */ React.createElement(PageHead, { title: "Parties", sub: `${db.parties.length} total`, right: /* @__PURE__ */ React.createElement(Btn, { kind: "brand", onClick: () => setEdit({}) }, "+ Add Party") }), /* @__PURE__ */ React.createElement("div", { className: "flex gap-2 mb-3 flex-wrap items-center" }, ["all", "Customer", "Supplier"].map((t) => /* @__PURE__ */ React.createElement("button", { key: t, onClick: () => setType(t), className: `px-3 py-1.5 rounded-full text-xs font-semibold border ${type === t ? "bg-red-600 text-white border-red-600" : "bg-zinc-900 text-zinc-400 border-zinc-700"}` }, t === "all" ? "All" : t + "s")), /* @__PURE__ */ React.createElement(Input, { value: q, onChange: (e) => setQ(e.target.value), placeholder: "\u{1F50D} Search name / phone\u2026", className: "!w-56" })), rows.length === 0 ? /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800" }, /* @__PURE__ */ React.createElement(Empty, { icon: "\u{1F465}", msg: "No parties found.", action: /* @__PURE__ */ React.createElement(Btn, { kind: "brand", size: "sm", onClick: () => setEdit({}) }, "Add Party") })) : /* @__PURE__ */ React.createElement(Table, { head: ["Name", "Type", "Phone", { t: "Balance", right: true }, "", ""] }, rows.map((p) => {
     const bal = derived.partyBalance[p.id] || 0;
-    return /* @__PURE__ */ React.createElement("tr", { key: p.id, className: "hover:bg-zinc-800/60 cursor-pointer", onClick: () => setEdit(p) }, /* @__PURE__ */ React.createElement(Td, { className: "font-semibold" }, p.name), /* @__PURE__ */ React.createElement(Td, null, /* @__PURE__ */ React.createElement("span", { className: `px-2 py-0.5 rounded-full text-[10px] font-bold ${p.type === "Supplier" ? "bg-blue-950/50 text-blue-400" : p.type === "Both" ? "bg-purple-950/50 text-purple-400" : "bg-emerald-950/50 text-emerald-400"}` }, p.type || "Customer")), /* @__PURE__ */ React.createElement(Td, { className: "text-zinc-400" }, p.phone || "\u2014"), /* @__PURE__ */ React.createElement(Td, { right: true, className: `font-bold ${bal > 0.01 ? "text-amber-400" : bal < -0.01 ? "text-red-400" : "text-zinc-600"}` }, Math.abs(bal) < 0.01 ? "\u2014" : fmt(Math.abs(bal), cur), bal > 0.01 && /* @__PURE__ */ React.createElement("span", { className: "text-[10px] font-semibold ml-1" }, "DR"), bal < -0.01 && /* @__PURE__ */ React.createElement("span", { className: "text-[10px] font-semibold ml-1" }, "CR")), /* @__PURE__ */ React.createElement(Td, { onClick: (e) => e.stopPropagation() }, /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "xs", onClick: () => go("reports", { tab: "ledger", partyId: p.id }) }, "Ledger")), /* @__PURE__ */ React.createElement(Td, { onClick: (e) => e.stopPropagation() }, /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "xs", className: "!text-red-400", onClick: () => setConfirm(p) }, "\u{1F5D1}")));
+    return /* @__PURE__ */ React.createElement("tr", { key: p.id, className: "hover:bg-zinc-800/60 cursor-pointer", onClick: () => go("party-detail", { partyId: p.id }) }, /* @__PURE__ */ React.createElement(Td, { className: "font-semibold" }, p.name), /* @__PURE__ */ React.createElement(Td, null, /* @__PURE__ */ React.createElement("span", { className: `px-2 py-0.5 rounded-full text-[10px] font-bold ${p.type === "Supplier" ? "bg-blue-950/50 text-blue-400" : p.type === "Both" ? "bg-purple-950/50 text-purple-400" : "bg-emerald-950/50 text-emerald-400"}` }, p.type || "Customer")), /* @__PURE__ */ React.createElement(Td, { className: "text-zinc-400" }, p.phone || "\u2014"), /* @__PURE__ */ React.createElement(Td, { right: true, className: `font-bold ${bal > 0.01 ? "text-amber-400" : bal < -0.01 ? "text-red-400" : "text-zinc-600"}` }, Math.abs(bal) < 0.01 ? "\u2014" : fmt(Math.abs(bal), cur), bal > 0.01 && /* @__PURE__ */ React.createElement("span", { className: "text-[10px] font-semibold ml-1" }, "DR"), bal < -0.01 && /* @__PURE__ */ React.createElement("span", { className: "text-[10px] font-semibold ml-1" }, "CR")), /* @__PURE__ */ React.createElement(Td, { onClick: (e) => e.stopPropagation() }, /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "xs", onClick: () => go("party-detail", { partyId: p.id, tab: "ledger" }) }, "Ledger")), /* @__PURE__ */ React.createElement(Td, { onClick: (e) => e.stopPropagation() }, /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "xs", className: "!text-red-400", onClick: () => setConfirm(p) }, "\u{1F5D1}")));
   })), /* @__PURE__ */ React.createElement("p", { className: "text-[11px] text-zinc-500 mt-2" }, "DR = party owes you (receivable) \xB7 CR = you owe party (payable)"), edit !== null && /* @__PURE__ */ React.createElement(PartyModal, { party: edit, onSave: async (p) => {
-    await actions.saveParty(p);
+    const saved = await actions.saveParty(p);
     setEdit(null);
+    go("party-detail", { partyId: saved.id });
   }, onClose: () => setEdit(null) }), confirm && /* @__PURE__ */ React.createElement(Confirm, { msg: `Delete "${confirm.name}"? Their invoices will remain but lose the link.`, onYes: () => actions.deleteParty(confirm.id), onClose: () => setConfirm(null) }));
 }
 function PartyModal({ party, onSave, onClose }) {
@@ -1365,6 +1435,83 @@ function PartyModal({ party, onSave, onClose }) {
     }
     onSave({ ...f, openingBalance: n2(f.openingBalance) });
   } }, "Save Party"))));
+}
+
+/**
+ * Party detail — the full "manage this customer/supplier" page (Module 2).
+ * PartyModal (above) stays a quick-add popup; once a party exists, every
+ * deeper action (contacts, ledger, visiting card, notes) lives here instead
+ * of overloading one modal with tabs.
+ */
+function PartyDetail({ db, derived, actions, go, S, partyId, tab: initTab }) {
+  const cur = S.currency;
+  const party = db.parties.find((p) => p.id === partyId);
+  const [tab, setTab] = useState(initTab || "profile");
+  const TABS = [["profile", "Profile"], ["ledger", "Ledger"], ["documents", "Documents"], ["notes", "Notes"]];
+  if (!party) {
+    return /* @__PURE__ */ React.createElement("div", { className: "anim-in" }, /* @__PURE__ */ React.createElement(PageHead, { title: "Party not found", right: /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "sm", onClick: () => go("parties") }, "← Parties") }), /* @__PURE__ */ React.createElement(Empty, { icon: "\u{1F465}", msg: "This party no longer exists." }));
+  }
+  const bal = derived.partyBalance[party.id] || 0;
+  const balSub = Math.abs(bal) > 0.01 ? (bal > 0 ? "Due " : "Advance ") + fmt(Math.abs(bal), cur) : "Settled";
+  return /* @__PURE__ */ React.createElement("div", { className: "anim-in" }, /* @__PURE__ */ React.createElement(PageHead, {
+    title: party.name,
+    sub: `${party.type || "Customer"}${party.phone ? " \xB7 " + party.phone : ""} \xB7 ${balSub}`,
+    right: /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "sm", onClick: () => go("parties") }, "← Parties")
+  }), /* @__PURE__ */ React.createElement("div", { className: "flex gap-1 border-b-2 border-zinc-800 mb-4 overflow-x-auto" }, TABS.map(([id, lbl]) => /* @__PURE__ */ React.createElement("button", { key: id, onClick: () => setTab(id), className: `px-4 py-2 text-sm font-semibold whitespace-nowrap -mb-0.5 border-b-2 transition ${tab === id ? "border-red-500 text-red-400" : "border-transparent text-zinc-500 hover:text-zinc-300"}` }, lbl))), tab === "profile" && /* @__PURE__ */ React.createElement(PartyProfileTab, { party, db, actions }), tab === "ledger" && /* @__PURE__ */ React.createElement(PartyLedgerTab, { party, db, cur }), tab === "documents" && /* @__PURE__ */ React.createElement(PartyDocumentsTab, { party, actions }), tab === "notes" && /* @__PURE__ */ React.createElement(PartyNotesTab, { party, actions }));
+}
+
+function PartyProfileTab({ party, db, actions }) {
+  const [f, setF] = useState({ name: party.name, type: party.type || "Customer", phone: party.phone || "", address: party.address || "", gstin: party.gstin || "", openingBalance: party.openingBalance || 0, category: party.category || "" });
+  const [newContact, setNewContact] = useState({ name: "", role: "", phone: "", whatsapp: "" });
+  const [savingContact, setSavingContact] = useState(false);
+  const set = (k, v) => setF((x) => ({ ...x, [k]: v }));
+  const contacts = db.partyContacts.filter((c) => c.partyId === party.id);
+  const saveProfile = () => {
+    if (!f.name.trim()) { toast("Name required", "warn"); return; }
+    actions.saveParty({ ...party, ...f, openingBalance: n2(f.openingBalance) });
+  };
+  const addContact = async () => {
+    if (!newContact.name.trim()) { toast("Contact name required", "warn"); return; }
+    setSavingContact(true);
+    await actions.saveContact({ partyId: party.id, ...newContact });
+    setNewContact({ name: "", role: "", phone: "", whatsapp: "" });
+    setSavingContact(false);
+  };
+  return /* @__PURE__ */ React.createElement("div", { className: "grid md:grid-cols-2 gap-4" }, /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800 p-4 space-y-3" }, /* @__PURE__ */ React.createElement("h3", { className: "text-xs font-bold uppercase tracking-wide text-zinc-500 mb-1" }, "Profile"), /* @__PURE__ */ React.createElement(Field, { label: "Name *" }, /* @__PURE__ */ React.createElement(Input, { value: f.name, onChange: (e) => set("name", e.target.value) })), /* @__PURE__ */ React.createElement("div", { className: "grid grid-cols-2 gap-3" }, /* @__PURE__ */ React.createElement(Field, { label: "Type" }, /* @__PURE__ */ React.createElement(Select, { value: f.type, onChange: (e) => set("type", e.target.value) }, /* @__PURE__ */ React.createElement("option", null, "Customer"), /* @__PURE__ */ React.createElement("option", null, "Supplier"), /* @__PURE__ */ React.createElement("option", null, "Both"))), /* @__PURE__ */ React.createElement(Field, { label: "Phone" }, /* @__PURE__ */ React.createElement(Input, { value: f.phone, onChange: (e) => set("phone", e.target.value), inputMode: "tel" }))), /* @__PURE__ */ React.createElement(Field, { label: "Address" }, /* @__PURE__ */ React.createElement(Input, { value: f.address, onChange: (e) => set("address", e.target.value) })), /* @__PURE__ */ React.createElement("div", { className: "grid grid-cols-2 gap-3" }, /* @__PURE__ */ React.createElement(Field, { label: "GSTIN" }, /* @__PURE__ */ React.createElement(Input, { value: f.gstin, onChange: (e) => set("gstin", e.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Category", hint: "e.g. Wholesale, VIP…" }, /* @__PURE__ */ React.createElement(Input, { value: f.category, onChange: (e) => set("category", e.target.value) }))), /* @__PURE__ */ React.createElement(Field, { label: "Opening balance", hint: "+ if they owe you, − if you owe them" }, /* @__PURE__ */ React.createElement(Input, { value: f.openingBalance, onChange: (e) => set("openingBalance", e.target.value), inputMode: "decimal" })), /* @__PURE__ */ React.createElement(Btn, { kind: "brand", className: "w-full mt-2", onClick: saveProfile }, "Save Profile")), /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800 p-4" }, /* @__PURE__ */ React.createElement("h3", { className: "text-xs font-bold uppercase tracking-wide text-zinc-500 mb-3" }, "Contacts"), contacts.length === 0 && /* @__PURE__ */ React.createElement("p", { className: "text-sm text-zinc-500 mb-3" }, "No contacts yet — add the people you actually talk to at this business below."), /* @__PURE__ */ React.createElement("div", { className: "space-y-2 mb-4" }, contacts.map((c) => /* @__PURE__ */ React.createElement("div", { key: c.id, className: "flex items-center justify-between gap-2 bg-zinc-800/60 rounded-lg px-3 py-2" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("div", { className: "text-sm font-semibold text-zinc-100" }, c.name, c.role && /* @__PURE__ */ React.createElement("span", { className: "text-zinc-500 font-normal" }, " — ", c.role)), /* @__PURE__ */ React.createElement("div", { className: "text-[11px] text-zinc-500" }, c.phone || "—")), /* @__PURE__ */ React.createElement("div", { className: "flex gap-1" }, (c.whatsapp || c.phone) && /* @__PURE__ */ React.createElement("a", { href: waLink(c.whatsapp || c.phone), target: "_blank", rel: "noreferrer", className: "w-8 h-8 flex items-center justify-center rounded-lg bg-emerald-950/50 text-emerald-400 hover:bg-emerald-950" }, "\u{1F4AC}"), c.phone && /* @__PURE__ */ React.createElement("a", { href: telLink(c.phone), className: "w-8 h-8 flex items-center justify-center rounded-lg bg-blue-950/50 text-blue-400 hover:bg-blue-950" }, "\u{1F4DE}"), /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "xs", className: "!text-red-400", onClick: () => actions.deleteContact(c.id) }, "\u{1F5D1}"))))), /* @__PURE__ */ React.createElement("div", { className: "border-t border-zinc-800 pt-3 space-y-2" }, /* @__PURE__ */ React.createElement("div", { className: "grid grid-cols-2 gap-2" }, /* @__PURE__ */ React.createElement(Input, { value: newContact.name, onChange: (e) => setNewContact((x) => ({ ...x, name: e.target.value })), placeholder: "Name" }), /* @__PURE__ */ React.createElement(Input, { value: newContact.role, onChange: (e) => setNewContact((x) => ({ ...x, role: e.target.value })), placeholder: "Role (Owner, Accountant…)" })), /* @__PURE__ */ React.createElement("div", { className: "grid grid-cols-2 gap-2" }, /* @__PURE__ */ React.createElement(Input, { value: newContact.phone, onChange: (e) => setNewContact((x) => ({ ...x, phone: e.target.value })), placeholder: "Phone", inputMode: "tel" }), /* @__PURE__ */ React.createElement(Input, { value: newContact.whatsapp, onChange: (e) => setNewContact((x) => ({ ...x, whatsapp: e.target.value })), placeholder: "WhatsApp (if different)", inputMode: "tel" })), /* @__PURE__ */ React.createElement(Btn, { kind: "soft", size: "sm", className: "w-full", disabled: savingContact, onClick: addContact }, "+ Add Contact"))));
+}
+
+function PartyLedgerTab({ party, db, cur }) {
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
+  const inRange = (d) => {
+    const dd = String(d).slice(0, 10);
+    return (!from || dd >= from) && (!to || dd <= to);
+  };
+  const entries = useMemo(() => buildLedgerEntries(party, db, inRange), [party, db, from, to]);
+  const closing = entries.length ? entries[entries.length - 1].bal : n2(party.openingBalance);
+  return /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("div", { className: "flex flex-wrap gap-2 items-center mb-3" }, /* @__PURE__ */ React.createElement(Input, { type: "date", value: from, onChange: (e) => setFrom(e.target.value), className: "!w-auto" }), /* @__PURE__ */ React.createElement("span", { className: "text-xs text-zinc-500" }, "to"), /* @__PURE__ */ React.createElement(Input, { type: "date", value: to, onChange: (e) => setTo(e.target.value), className: "!w-auto" }), /* @__PURE__ */ React.createElement("div", { className: "ml-auto font-bold text-sm" }, "Closing: ", /* @__PURE__ */ React.createElement("span", { className: `num ${closing > 0.01 ? "text-amber-400" : closing < -0.01 ? "text-red-400" : "text-zinc-400"}` }, fmt(closing, cur)))), entries.length === 0 ? /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800" }, /* @__PURE__ */ React.createElement(Empty, { icon: "\u{1F4D2}", msg: "No ledger entries in this range." })) : /* @__PURE__ */ React.createElement(Table, { head: ["Date", "Ref", "Description", { t: "Debit", right: true }, { t: "Credit", right: true }, { t: "Balance", right: true }] }, entries.map((e, i) => /* @__PURE__ */ React.createElement("tr", { key: i }, /* @__PURE__ */ React.createElement(Td, { className: "whitespace-nowrap text-zinc-400" }, fdate(e.date)), /* @__PURE__ */ React.createElement(Td, { className: "text-xs" }, e.ref), /* @__PURE__ */ React.createElement(Td, null, e.desc), /* @__PURE__ */ React.createElement(Td, { right: true }, e.dr > 0 ? fmt(e.dr, cur) : "—"), /* @__PURE__ */ React.createElement(Td, { right: true }, e.cr > 0 ? fmt(e.cr, cur) : "—"), /* @__PURE__ */ React.createElement(Td, { right: true, className: `font-bold ${e.bal > 0.01 ? "text-amber-400" : e.bal < -0.01 ? "text-red-400" : "text-zinc-300"}` }, fmt(e.bal, cur))))));
+}
+
+function PartyDocumentsTab({ party, actions }) {
+  const [uploading, setUploading] = useState(false);
+  const fileRef = useRef(null);
+  const onFile = async (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    setUploading(true);
+    try {
+      await actions.uploadVisitingCard(party, file);
+    } catch (err) {
+      toast("Upload failed: " + (err.message || err), "err");
+    }
+    setUploading(false);
+  };
+  return /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800 p-4 max-w-md" }, /* @__PURE__ */ React.createElement("h3", { className: "text-xs font-bold uppercase tracking-wide text-zinc-500 mb-3" }, "Visiting card"), party.visitingCardUrl ? /* @__PURE__ */ React.createElement("a", { href: party.visitingCardUrl, target: "_blank", rel: "noreferrer" }, /* @__PURE__ */ React.createElement("img", { src: party.visitingCardUrl, className: "w-full rounded-lg border border-zinc-700 mb-3", alt: "Visiting card" })) : /* @__PURE__ */ React.createElement(Empty, { icon: "\u{1F4C7}", msg: "No visiting card uploaded yet." }), /* @__PURE__ */ React.createElement("input", { ref: fileRef, type: "file", accept: "image/*", className: "hidden", onChange: onFile }), /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", className: "w-full", disabled: uploading, onClick: () => fileRef.current.click() }, uploading ? "Uploading…" : party.visitingCardUrl ? "Replace visiting card" : "Upload visiting card"));
+}
+
+function PartyNotesTab({ party, actions }) {
+  const [notes, setNotes] = useState(party.notes || "");
+  return /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800 p-4 max-w-2xl" }, /* @__PURE__ */ React.createElement("h3", { className: "text-xs font-bold uppercase tracking-wide text-zinc-500 mb-3" }, "Notes"), /* @__PURE__ */ React.createElement("p", { className: "text-[11px] text-zinc-500 mb-2" }, "This becomes a full follow-up timeline in a later module — for now it's a free-text notebook for this party."), /* @__PURE__ */ React.createElement("textarea", { value: notes, onChange: (e) => setNotes(e.target.value), rows: 8, className: `${inputCls} resize-y` }), /* @__PURE__ */ React.createElement(Btn, { kind: "brand", className: "mt-3", onClick: () => actions.saveParty({ ...party, notes }) }, "Save Notes"));
 }
 function PaymentsPage({ db, derived, actions, S, prefillInvoice }) {
   const cur = S.currency;
@@ -1510,27 +1657,34 @@ function PurchaseReport({ purs, derived, cur }) {
   const rows = Object.entries(byParty).sort((a, b) => b[1].total - a[1].total);
   return rows.length === 0 ? /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800" }, /* @__PURE__ */ React.createElement(Empty, { icon: "\u{1F4E6}", msg: "No purchases in this period." })) : /* @__PURE__ */ React.createElement(Table, { head: ["Supplier", { t: "Bills", right: true }, { t: "Total", right: true }, { t: "Paid", right: true }, { t: "Payable", right: true }] }, rows.map(([name, d]) => /* @__PURE__ */ React.createElement("tr", { key: name }, /* @__PURE__ */ React.createElement(Td, { className: "font-semibold" }, name), /* @__PURE__ */ React.createElement(Td, { right: true }, d.count), /* @__PURE__ */ React.createElement(Td, { right: true, className: "font-bold" }, fmt(d.total, cur)), /* @__PURE__ */ React.createElement(Td, { right: true, className: "text-emerald-400" }, fmt(d.paid, cur)), /* @__PURE__ */ React.createElement(Td, { right: true, className: "text-red-400" }, fmt(d.total - d.paid, cur)))));
 }
+/**
+ * Shared by the Party Ledger report tab AND the Party Detail page's Ledger
+ * tab, so the two views can never drift out of sync with each other — one
+ * function computing "what does this party owe/get owed", reused everywhere
+ * that needs it, per the app's no-duplicate-logic rule.
+ */
+function buildLedgerEntries(party, db, inRange) {
+  if (!party) return [];
+  const rows = [];
+  db.invoices.filter((i) => i.partyId === party.id && inRange(i.date)).forEach((i) => rows.push({ date: i.date, ref: i.invNo, desc: "Sale invoice", dr: n2(i.total), cr: 0 }));
+  db.purchases.filter((p) => p.partyId === party.id && inRange(p.date)).forEach((p) => rows.push({ date: p.date, ref: p.billNo, desc: "Purchase bill", dr: 0, cr: n2(p.total) }));
+  db.payments.filter((pm) => pm.partyId === party.id && inRange(pm.date)).forEach((pm) => rows.push({
+    date: pm.date,
+    ref: pm.mode,
+    desc: pm.direction === "In" ? "Payment received" : "Payment made",
+    dr: pm.direction === "Out" ? n2(pm.amount) : 0,
+    cr: pm.direction === "In" ? n2(pm.amount) : 0
+  }));
+  rows.sort((a, b) => String(a.date).localeCompare(String(b.date)));
+  let bal = n2(party.openingBalance);
+  return rows.map((r) => {
+    bal += r.dr - r.cr;
+    return { ...r, bal };
+  });
+}
 function LedgerReport({ db, derived, cur, ledgerParty, setLedgerParty, inRange }) {
   const party = db.parties.find((p) => p.id === ledgerParty);
-  const entries = useMemo(() => {
-    if (!party) return [];
-    const rows = [];
-    db.invoices.filter((i) => i.partyId === party.id && inRange(i.date)).forEach((i) => rows.push({ date: i.date, ref: i.invNo, desc: "Sale invoice", dr: n2(i.total), cr: 0 }));
-    db.purchases.filter((p) => p.partyId === party.id && inRange(p.date)).forEach((p) => rows.push({ date: p.date, ref: p.billNo, desc: "Purchase bill", dr: 0, cr: n2(p.total) }));
-    db.payments.filter((pm) => pm.partyId === party.id && inRange(pm.date)).forEach((pm) => rows.push({
-      date: pm.date,
-      ref: pm.mode,
-      desc: pm.direction === "In" ? "Payment received" : "Payment made",
-      dr: pm.direction === "Out" ? n2(pm.amount) : 0,
-      cr: pm.direction === "In" ? n2(pm.amount) : 0
-    }));
-    rows.sort((a, b) => String(a.date).localeCompare(String(b.date)));
-    let bal = n2(party.openingBalance);
-    return rows.map((r) => {
-      bal += r.dr - r.cr;
-      return { ...r, bal };
-    });
-  }, [party, db, inRange]);
+  const entries = useMemo(() => buildLedgerEntries(party, db, inRange), [party, db, inRange]);
   return /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("div", { className: "mb-3 max-w-sm" }, /* @__PURE__ */ React.createElement(
     AutoComplete,
     {

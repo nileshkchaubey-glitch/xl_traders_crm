@@ -15,7 +15,8 @@
 // ================= SHEET SCHEMA =================
 var SCHEMA = {
   Items: ['id','name','brand','category','unit','packSize','saleRate','purchaseRate','stock','minStock','active'],
-  Parties: ['id','name','type','phone','address','gstin','openingBalance','notes'],
+  Parties: ['id','name','type','phone','address','gstin','openingBalance','notes','category','visitingCardUrl'],
+  PartyContacts: ['id','partyId','name','role','phone','whatsapp'],
   Invoices: ['id','invNo','date','partyId','partyName','subTotal','discount','taxPct','taxAmt','total','payMode','status','notes','createdAt'],
   InvoiceItems: ['id','invoiceId','itemId','name','brand','packing','packs','qty','rate','amount','cost'],
   Purchases: ['id','billNo','date','partyId','partyName','subTotal','other','total','payMode','notes','createdAt'],
@@ -248,6 +249,7 @@ function bootstrap() {
     settings: settings,
     items: readAll_('Items'),
     parties: readAll_('Parties'),
+    partyContacts: readAll_('PartyContacts'),
     invoices: readAll_('Invoices'),
     invoiceItems: readAll_('InvoiceItems'),
     purchases: readAll_('Purchases'),
@@ -416,8 +418,36 @@ function apiSaveItem(json)    { return withLock_(function(){ return JSON.stringi
 function apiSaveParty(json)   { return withLock_(function(){ return JSON.stringify({ ok: true, record: upsert_('Parties',  JSON.parse(json)) }); }); }
 function apiSavePayment(json) { return withLock_(function(){ return JSON.stringify({ ok: true, record: upsert_('Payments', JSON.parse(json)) }); }); }
 function apiDeleteItem(id)    { return withLock_(function(){ deleteById_('Items', id);    return JSON.stringify({ ok: true }); }); }
-function apiDeleteParty(id)   { return withLock_(function(){ deleteById_('Parties', id);  return JSON.stringify({ ok: true }); }); }
+function apiDeleteParty(id)   { return withLock_(function(){ deleteById_('Parties', id); deleteChildren_('PartyContacts', 'partyId', id); return JSON.stringify({ ok: true }); }); }
 function apiDeletePayment(id) { return withLock_(function(){ deleteById_('Payments', id); return JSON.stringify({ ok: true }); }); }
+
+// ---- Party contacts (Module 2: CRM depth — one party can have many people) ----
+function apiSaveContact(json) { return withLock_(function(){ return JSON.stringify({ ok: true, record: upsert_('PartyContacts', JSON.parse(json)) }); }); }
+function apiDeleteContact(id) { return withLock_(function(){ deleteById_('PartyContacts', id); return JSON.stringify({ ok: true }); }); }
+
+/**
+ * Upload a party's visiting card image to Drive and return its file URL.
+ * payload = { partyId, name, mimeType, base64 }. Stored in a single app folder
+ * (created on first use) so all visiting cards live in one place, not scattered
+ * across the uploader's My Drive root.
+ *
+ * Deliberately does NOT change the file's sharing settings — a visiting card
+ * has someone's personal name/phone on it, so it stays private to this
+ * Google account (same access as the spreadsheet itself) instead of becoming
+ * a public "anyone with the link" URL. Only someone already logged into the
+ * account that owns this Sheet can open it, exactly like every other record
+ * in this app.
+ */
+function apiUploadVisitingCard(payloadJson) {
+  var payload = JSON.parse(payloadJson);
+  var folderName = 'XL Traders ERP - Visiting Cards';
+  var folders = DriveApp.getFoldersByName(folderName);
+  var folder = folders.hasNext() ? folders.next() : DriveApp.createFolder(folderName);
+  var bytes = Utilities.base64Decode(payload.base64);
+  var blob = Utilities.newBlob(bytes, payload.mimeType, payload.name || 'visiting-card');
+  var file = folder.createFile(blob);
+  return JSON.stringify({ ok: true, url: file.getUrl() });
+}
 
 // ---- Settings ----
 function getSettings_() {
