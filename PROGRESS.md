@@ -20,7 +20,7 @@ Resume rule: read this file, find the first module NOT marked `[DONE]`, start th
 - [DONE] Module 8 — Products, Categories, Brands, Stock Ledger — 2026-07-04
 - [DONE] Module 9 — Follow-up CRM — 2026-07-04
 - [DONE] Module 10 — Admin & Roles — 2026-07-04
-- [ ] Module 11 — Reports completion, Charts, Export
+- [DONE] Module 11 — Reports completion, Charts, Export — 2026-07-04
 - [ ] Module 12 — Final QA pass
 
 ## Module 0 detail
@@ -319,23 +319,45 @@ Staff-only session (reseeded the mock identity as the Staff account) and confirm
 and Settings both disappeared from the sidebar, and the command palette returned "No matches" for
 a "Settings" search — the gating holds across all three surfaces (nav, direct route, palette).
 
-## STATUS AS OF 2026-07-04 — resume from Module 11
+## Module 11 detail
+Added a dependency-free `BarChart` component — plain flex divs sized by percentage-of-max width,
+not SVG/canvas or a charting library. Production already depends on one CDN fetch that can fail
+(Tailwind, see `__cdnFail`); a charting library would be a second external dependency for what a
+dozen styled divs render identically, with zero new failure modes. Wired into: P&L (top 8 items by
+profit), Sales (sales by month), and Outstanding (due by aging bucket) — the three report tabs
+where a trend/comparison is more legible as a chart than another table.
+Added a shared `downloadCsv(filename, rows, cols)` helper (extracted from the existing whole-
+database `exportCSV`) and gave every report tab its own contextual "⬇ Export CSV" button —
+P&L (item-wise profit), Sales (monthly), Purchase (by supplier), Stock (by item), Outstanding
+(aging detail) — exporting exactly what's on screen for that tab/date range, distinct from the
+existing Settings page button that dumps the entire database at once.
+That whole-database export (`exportCSV`) was also **completed** — it previously only covered 5
+entities (Items/Parties/Invoices/Purchases/Payments) from early modules and had silently gone
+stale as Quotations, Sales Orders, Sales/Purchase Returns, Opening Balances, and Follow-ups were
+added in later modules. Now includes all of them.
+Verified live in a headless Chromium browser: seeded two months of invoices (two items, mixed
+paid/unpaid) and one purchase, widened the report date range, and confirmed the P&L item-profit
+chart and Sales monthly chart both render bars proportional to the correct underlying numbers;
+triggered CSV downloads from P&L and Sales tabs and confirmed the browser's download event fired
+with the expected filename; confirmed the Outstanding aging-bucket chart's ₹750 in the 31–60 day
+bucket matches the sum of the two unpaid invoices shown in the table beneath it; and confirmed the
+whole-database export from Settings now includes all ten completed entity sections (previously
+five), not just the ones that existed when that button was first built.
 
-**Fully done, verified, committed:** Modules 0–10 (dark re-theme, keyboard core, CRM depth, opening
+## STATUS AS OF 2026-07-04 — resume from Module 12
+
+**Fully done, verified, committed:** Modules 0–11 (dark re-theme, keyboard core, CRM depth, opening
 balances, full Quotation→Sales Order→Invoice→Sales Return suite, dispatch tracking + cash/credit
 risk alert, full Purchase Suite with Purchase Return, Bulk Payment Entry, Category/Brand filters +
-Stock Ledger, Follow-up CRM, and now Admin & Roles). Each was checked by actually running the app
-in a headless Chromium browser against the mock server, not just read for correctness — Module
-10's verification specifically simulated both an Owner and a Staff session to confirm the role
-gating actually holds, not just that the Owner path works.
+Stock Ledger, Follow-up CRM, Admin & Roles, and now Reports charts/export completion). Each was
+checked by actually running the app in a headless Chromium browser against the mock server, not
+just read for correctness.
 
-**Not started: Modules 11–12.** Reports completion/Charts/Export and the final QA pass remain.
-Stopping at a clean module boundary, with everything so far genuinely finished and tested, is the
-honest choice over rushing the last stretch.
+**Not started: Module 12 — Final QA pass.** This is the last module: a full pass through the app
+checking for regressions across all 11 preceding modules together (not each in isolation), dead
+code/placeholders, consistent styling, and a final honest look at anything that slipped through.
 
 **To resume:** open a new session against this same branch/repo, tell Claude "read PROGRESS.md,
-resume from Module 11," and it starts on Reports completion (the existing Reports page already has
-P&L/Sales/Purchase/Party Ledger/Stock/Outstanding tabs with real data — this module is about
-finishing whatever's incomplete there, likely: chart/graph visualizations of the existing report
-data, and a CSV/export mechanism per report tab, building on the "Export all data (CSV)" button
-that already exists on the Settings page for the whole database).
+resume from Module 12," and it does the final QA pass — then the whole 12-module build described
+in ONESHOT_PROMPT1.md is complete, and the suggestions-for-further-improvement the user originally
+asked for (at the very start of this session) should be delivered.
