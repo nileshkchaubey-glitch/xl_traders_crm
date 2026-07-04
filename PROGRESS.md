@@ -17,7 +17,7 @@ Resume rule: read this file, find the first module NOT marked `[DONE]`, start th
 - [DONE] Module 5 — Dispatch Tracking + Cash/Credit Sale Type + Payment Risk Alert — 2026-07-04
 - [DONE] Module 6 — Purchase Suite (Purchase Return + supplier bill matching) — 2026-07-04
 - [DONE] Module 7 — Bulk Payment Entry — 2026-07-04
-- [ ] Module 8 — Products, Categories, Brands, Stock Ledger
+- [DONE] Module 8 — Products, Categories, Brands, Stock Ledger — 2026-07-04
 - [ ] Module 9 — Follow-up CRM
 - [ ] Module 10 — Admin & Roles
 - [ ] Module 11 — Reports completion, Charts, Export
@@ -202,6 +202,34 @@ confirmed three separate Payments rows were written (300 against BP-OLD, 700 aga
 invoices paid!", proving the allocation actually clears the receivable through the normal
 paidByRef path with no special-casing needed.
 
+## Module 8 detail
+`category`/`brand` were already plain fields on `Items` (no dedicated sheets existed or were
+needed — a small trading business has maybe a dozen categories/brands total, so a free-text field
+plus filters built from the item list's own distinct values is simpler than a separate CRUD entity
+with its own add/edit/delete screens, and it can never drift out of sync with what items actually
+use). `ItemsPage` gained two dropdown filters — Category and Brand — built from
+`[...new Set(db.items.map(...))]` over whatever values are already in use, combinable with each
+other, the free-text search, and the existing "Low stock only" checkbox.
+The bigger piece: a real **Stock Ledger**, which didn't exist before (the old "Stock" report tab
+was just a current-snapshot valuation, no movement history). `buildStockLedgerEntries(item, db,
+derived)` mirrors the existing `buildLedgerEntries` party-ledger pattern: it collects every
+Purchase (IN), Invoice (OUT), Sales Return (IN), and Purchase Return (OUT) line for one item,
+sorts oldest-first, and computes a running balance. Since `item.stock` is always the live total
+(mutated directly by `adjustStock_`/`stockAdj` on every save) rather than a derived value, there's
+no stored "opening stock" transaction to read — so opening is reverse-derived as
+`current stock − sum(all movement deltas)`, which also self-checks: the ledger's last running
+balance always equals `item.stock` exactly, or a bug would be immediately visible.
+`ItemLedgerModal` (wide modal, same visual language as `SalesReturnsList`'s view modal) is wired
+from two places: a new "📒" button per row on `ItemsPage`, and clicking any row in the Reports →
+Stock tab (which now also receives `derived`) — same dual-access pattern Party Ledger already has
+(Parties list "Ledger" button + Reports → Party Ledger tab).
+Verified live in a headless Chromium browser: seeded one item through a full
+Purchase(+50)→Sale(−20)→Sales Return(+5)→Purchase Return(−3) history (net stock 32, matching the
+seeded `item.stock`), confirmed the category and brand dropdown filters each correctly isolated
+the right item, and confirmed the ledger modal — opened both from Items & Stock and from
+Reports → Stock — showed all four movements in date order with a running balance ending exactly
+at 50 → 30 → 35 → 32, matching current stock with no discrepancy.
+
 ## Notes
 - Testing method: mock mode only (localStorage mockServer, IS_GAS=false), verified by opening
   Index.html directly in a browser (Playwright/Chromium) — no Google login is available in this
@@ -214,21 +242,22 @@ paidByRef path with no special-casing needed.
   later polish pass rather than fixed now since it touches balance-label wording used everywhere,
   not just the Purchase Suite.
 
-## STATUS AS OF 2026-07-04 — resume from Module 8
+## STATUS AS OF 2026-07-04 — resume from Module 9
 
-**Fully done, verified, committed:** Modules 0–7 (dark re-theme, keyboard core, CRM depth, opening
+**Fully done, verified, committed:** Modules 0–8 (dark re-theme, keyboard core, CRM depth, opening
 balances, full Quotation→Sales Order→Invoice→Sales Return suite, dispatch tracking + cash/credit
-risk alert, full Purchase Suite with Purchase Return, and now Bulk Payment Entry). Each was checked
-by actually running the app in a headless Chromium browser against the mock server, not just read
-for correctness — Module 7's verification confirmed auto-allocation, on-account overflow, and the
-Outstanding report all agree after a real bulk save.
+risk alert, full Purchase Suite with Purchase Return, Bulk Payment Entry, and now Category/Brand
+filters + a real Stock Ledger). Each was checked by actually running the app in a headless
+Chromium browser against the mock server, not just read for correctness — Module 8's verification
+confirmed the ledger's running balance reconciles exactly against `item.stock` after a mixed
+purchase/sale/both-returns history.
 
-**Not started: Modules 8–12.** Categories/Brands/Stock Ledger, Follow-up CRM, Admin/Roles,
-Reports/Charts/Export, and the final QA pass remain. Stopping at a clean module boundary, with
-everything so far genuinely finished and tested, is the honest choice over rushing several large
-modules at once.
+**Not started: Modules 9–12.** Follow-up CRM, Admin/Roles, Reports/Charts/Export, and the final QA
+pass remain. Stopping at a clean module boundary, with everything so far genuinely finished and
+tested, is the honest choice over rushing several large modules at once.
 
 **To resume:** open a new session against this same branch/repo, tell Claude "read PROGRESS.md,
-resume from Module 8," and it starts on Products/Categories/Brands + a Stock Ledger report (a
-per-item running-balance view of every stock movement — purchases, invoices, sales/purchase
-returns — across the modules already built).
+resume from Module 9," and it starts on Follow-up CRM (likely: a due-date/reminder field on
+parties or a dedicated follow-ups list, surfaced on the Dashboard — e.g. "call this customer
+back", "payment reminder due" — the spec text itself should be checked for the exact shape since
+it wasn't retained verbatim in this file).
