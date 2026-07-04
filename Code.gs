@@ -19,7 +19,7 @@ var SCHEMA = {
   PartyContacts: ['id','partyId','name','role','phone','whatsapp'],
   Invoices: ['id','invNo','date','partyId','partyName','subTotal','discount','taxPct','taxAmt','total','payMode','status','notes','createdAt','sourceType','sourceId','billType','dispatchStatus','dispatchedAt'],
   InvoiceItems: ['id','invoiceId','itemId','name','brand','packing','packs','qty','rate','amount','cost'],
-  Purchases: ['id','billNo','date','partyId','partyName','subTotal','other','total','payMode','notes','createdAt'],
+  Purchases: ['id','billNo','date','partyId','partyName','subTotal','other','total','payMode','notes','createdAt','supplierInvoiceNo'],
   PurchaseItems: ['id','purchaseId','itemId','name','qty','rate','amount'],
   Payments: ['id','date','partyId','partyName','refType','refId','amount','mode','direction','notes'],
   OpeningBalances: ['id','type','partyId','partyName','billNo','date','amount','paidAmount','notes','createdAt'],
@@ -37,6 +37,12 @@ var SCHEMA = {
   // deducted exactly once, at Invoice save; marking something Dispatched just flips a
   // status flag and logs who/when, because printing a bill isn't the same as it leaving.
   DispatchLog: ['id','invoiceId','invNo','partyName','action','vehicleNo','transporter','notes','timestamp','userEmail'],
+  // ---- Purchase Suite (Module 6): Purchase Return — the exact mirror of Sales Return
+  // (Module 4), reversed: stock goes OUT (goods going back to the supplier) and the
+  // payable is reduced, using the same synthetic-Payments-row trick for the same reason
+  // (Payments stays the one source of truth for "how much of this bill is settled").
+  PurchaseReturns: ['id','prNo','date','partyId','partyName','subTotal','total','status','notes','createdAt','sourceType','sourceId'],
+  PurchaseReturnItems: ['id','purchaseReturnId','purchaseItemId','itemId','name','qty','rate','amount'],
   Settings: ['key','value'],
   Counters: ['key','value']
 };
@@ -53,6 +59,7 @@ var DEFAULT_SETTINGS = {
   quoPrefix: 'QUO-',
   soPrefix: 'SO-',
   srPrefix: 'SR-',
+  prPrefix: 'PR-',
   taxEnabled: false,
   taxPct: 18,
   taxLabel: 'GST',
@@ -280,7 +287,9 @@ function bootstrap() {
     salesOrderItems: readAll_('SalesOrderItems'),
     salesReturns: readAll_('SalesReturns'),
     salesReturnItems: readAll_('SalesReturnItems'),
-    dispatchLog: readAll_('DispatchLog')
+    dispatchLog: readAll_('DispatchLog'),
+    purchaseReturns: readAll_('PurchaseReturns'),
+    purchaseReturnItems: readAll_('PurchaseReturnItems')
   });
 }
 
@@ -737,4 +746,73 @@ function apiHtmlToPdf(payloadJson) {
   var blob = Utilities.newBlob(payload.html, 'text/html', payload.filename || 'document.html');
   var pdf = blob.getAs('application/pdf');
   return JSON.stringify({ ok: true, base64: Utilities.base64Encode(pdf.getBytes()) });
+}
+
+// ================= PURCHASE SUITE (Module 6) =================
+/**
+ * Purchase Return — the exact mirror of apiSaveSalesReturn (Module 4), reversed: stock
+ * goes OUT (goods going back to the supplier) instead of in, and the payable is reduced
+ * via a Payments row with direction 'Out' instead of 'In'. Same id-sharing trick: the
+ * synthetic payment's id equals this return's id, so deleting the return can find and
+ * remove exactly that one debit in O(1) — see the apiSaveSalesReturn comment for why.
+ * payload = { purchaseReturn: {...}, items: [{ purchaseItemId, itemId, name, qty, rate, amount }] }
+ */
+function apiSavePurchaseReturn(payloadJson) {
+  return withLock_(function() {
+    var payload = JSON.parse(payloadJson);
+    var pr = payload.purchaseReturn;
+    var lines = payload.items || [];
+    if (!pr.id) {
+      var settings = getSettings_();
+      pr.id = Utilities.getUuid().slice(0, 8);
+      pr.prNo = settings.prPrefix + nextCounter_('PR');
+      pr.createdAt = new Date().toISOString();
+      pr.status = 'Completed';
+    }
+    pr = upsert_('PurchaseReturns', pr);
+
+    var deltas = {};
+    if (lines.length) {
+      var rows = lines.map(function(l) {
+        l.id = l.id || Utilities.getUuid().slice(0, 8);
+        l.purchaseReturnId = pr.id;
+        if (l.itemId) deltas[l.itemId] = (deltas[l.itemId] || 0) - Number(l.qty || 0); // stock OUT
+        return toRow_('PurchaseReturnItems', l);
+      });
+      var sh = getSheet_('PurchaseReturnItems');
+      sh.getRange(sh.getLastRow() + 1, 1, rows.length, rows[0].length).setValues(rows);
+    }
+    adjustStock_(deltas);
+
+    if (Number(pr.total) > 0 && pr.sourceId) {
+      upsert_('Payments', {
+        id: pr.id,
+        date: pr.date,
+        partyId: pr.partyId,
+        partyName: pr.partyName,
+        refType: 'PurchaseReturn',
+        refId: pr.sourceId,
+        amount: Number(pr.total),
+        mode: pr.prNo,
+        direction: 'Out',
+        notes: 'Goods returned to supplier, return ' + pr.prNo
+      });
+    }
+
+    return JSON.stringify({ ok: true, purchaseReturn: pr, items: readAll_('PurchaseReturnItems').filter(function(l){ return l.purchaseReturnId === pr.id; }) });
+  });
+}
+/** Delete a Purchase Return: reverses the stock-out and removes its linked debit. */
+function apiDeletePurchaseReturn(id) {
+  return withLock_(function() {
+    var removed = deleteChildren_('PurchaseReturnItems', 'purchaseReturnId', id);
+    var deltas = {};
+    removed.forEach(function(l) {
+      if (l.itemId) deltas[l.itemId] = (deltas[l.itemId] || 0) + Number(l.qty || 0); // reverse stock OUT
+    });
+    adjustStock_(deltas);
+    deleteById_('Payments', id);
+    deleteById_('PurchaseReturns', id);
+    return JSON.stringify({ ok: true });
+  });
 }

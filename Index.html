@@ -135,7 +135,8 @@ function mockDB() {
     purchases: [], purchaseItems: [], payments: [], openingBalances: [],
     quotations: [], quotationItems: [], salesOrders: [], salesOrderItems: [], salesReturns: [], salesReturnItems: [],
     dispatchLog: [],
-    counters: { INV: 0, PUR: 0, QUO: 0, SO: 0, SR: 0 }
+    purchaseReturns: [], purchaseReturnItems: [],
+    counters: { INV: 0, PUR: 0, QUO: 0, SO: 0, SR: 0, PR: 0 }
   };
 }
 function mockSave(db) {
@@ -153,6 +154,7 @@ const MOCK_DEFAULT_SETTINGS = {
   quoPrefix: "QUO-",
   soPrefix: "SO-",
   srPrefix: "SR-",
+  prPrefix: "PR-",
   taxEnabled: false,
   taxPct: 18,
   taxLabel: "GST",
@@ -186,6 +188,9 @@ async function mockServer(fn, args) {
       if (!db.salesReturns) db.salesReturns = [];
       if (!db.salesReturnItems) db.salesReturnItems = [];
       if (!db.dispatchLog) db.dispatchLog = [];
+      if (!db.purchaseReturns) db.purchaseReturns = [];
+      if (!db.purchaseReturnItems) db.purchaseReturnItems = [];
+      if (!db.counters.PR) db.counters.PR = 0;
       if (!db.counters.QUO) db.counters.QUO = 0;
       if (!db.counters.SO) db.counters.SO = 0;
       if (!db.counters.SR) db.counters.SR = 0;
@@ -442,6 +447,47 @@ async function mockServer(fn, args) {
       db.dispatchLog.push({ id: uid(), invoiceId: p.invoiceId, invNo: inv.invNo, partyName: inv.partyName, action: p.action, vehicleNo: p.vehicleNo || "", transporter: p.transporter || "", notes: p.notes || "", timestamp: (/* @__PURE__ */ new Date()).toISOString(), userEmail: "local-preview@example.com" });
       mockSave(db);
       return { ok: true, dispatchStatus: inv.dispatchStatus, dispatchedAt: inv.dispatchedAt };
+    }
+    case "apiSavePurchaseReturn": {
+      const p = parse(args[0]);
+      const pr = p.purchaseReturn;
+      const deltas = {};
+      if (!pr.id) {
+        pr.id = uid();
+        db.counters.PR += 1;
+        pr.prNo = (db.settings.prPrefix || "PR-") + db.counters.PR;
+        pr.createdAt = (/* @__PURE__ */ new Date()).toISOString();
+        pr.status = "Completed";
+      }
+      const idx = db.purchaseReturns.findIndex((x) => x.id === pr.id);
+      idx >= 0 ? db.purchaseReturns[idx] = pr : db.purchaseReturns.push(pr);
+      p.items.forEach((l) => {
+        l.id = l.id || uid();
+        l.purchaseReturnId = pr.id;
+        if (l.itemId) deltas[l.itemId] = (deltas[l.itemId] || 0) - n2(l.qty);
+        db.purchaseReturnItems.push(l);
+      });
+      stockAdj(deltas);
+      if (n2(pr.total) > 0 && pr.sourceId) {
+        const pIdx = db.payments.findIndex((x) => x.id === pr.id);
+        const paymentRow = { id: pr.id, date: pr.date, partyId: pr.partyId, partyName: pr.partyName, refType: "PurchaseReturn", refId: pr.sourceId, amount: n2(pr.total), mode: pr.prNo, direction: "Out", notes: "Goods returned to supplier, return " + pr.prNo };
+        pIdx >= 0 ? db.payments[pIdx] = paymentRow : db.payments.push(paymentRow);
+      }
+      mockSave(db);
+      return { ok: true, purchaseReturn: pr, items: db.purchaseReturnItems.filter((l) => l.purchaseReturnId === pr.id) };
+    }
+    case "apiDeletePurchaseReturn": {
+      const id = args[0];
+      const deltas = {};
+      db.purchaseReturnItems.filter((l) => l.purchaseReturnId === id).forEach((l) => {
+        if (l.itemId) deltas[l.itemId] = (deltas[l.itemId] || 0) + n2(l.qty);
+      });
+      stockAdj(deltas);
+      db.purchaseReturnItems = db.purchaseReturnItems.filter((l) => l.purchaseReturnId !== id);
+      db.payments = db.payments.filter((x) => x.id !== id);
+      db.purchaseReturns = db.purchaseReturns.filter((x) => x.id !== id);
+      mockSave(db);
+      return { ok: true };
     }
     case "apiUploadVisitingCard": {
       const p = parse(args[0]);
@@ -782,6 +828,7 @@ const NAV = [
   { sec: "PURCHASE & STOCK", items: [
     { id: "new-purchase", icon: "\u{1F4E5}", label: "New Purchase" },
     { id: "purchases", icon: "\u{1F4E6}", label: "Purchase List" },
+    { id: "purchase-returns", icon: "\u21A9\uFE0F", label: "Purchase Returns" },
     { id: "items", icon: "\u{1F3F7}\uFE0F", label: "Items & Stock" },
     { id: "parties", icon: "\u{1F465}", label: "Parties" }
   ] },
@@ -871,7 +918,15 @@ function App() {
     db.salesReturnItems.forEach((l) => {
       if (l.invoiceItemId) returnedQtyByInvoiceItem[l.invoiceItemId] = (returnedQtyByInvoiceItem[l.invoiceItemId] || 0) + n2(l.qty);
     });
-    return { itemMap, partyMap, paidByRef, partyBalance, linesByInvoice, linesByPurchase, linesByQuotation, linesBySalesOrder, linesBySalesReturn, returnedQtyByInvoiceItem };
+    const linesByPurchaseReturn = {};
+    db.purchaseReturnItems.forEach((l) => (linesByPurchaseReturn[l.purchaseReturnId] = linesByPurchaseReturn[l.purchaseReturnId] || []).push(l));
+    // Mirrors returnedQtyByInvoiceItem above — caps a Purchase Return line at
+    // (originally purchased qty − already returned qty).
+    const returnedQtyByPurchaseItem = {};
+    db.purchaseReturnItems.forEach((l) => {
+      if (l.purchaseItemId) returnedQtyByPurchaseItem[l.purchaseItemId] = (returnedQtyByPurchaseItem[l.purchaseItemId] || 0) + n2(l.qty);
+    });
+    return { itemMap, partyMap, paidByRef, partyBalance, linesByInvoice, linesByPurchase, linesByQuotation, linesBySalesOrder, linesBySalesReturn, returnedQtyByInvoiceItem, linesByPurchaseReturn, returnedQtyByPurchaseItem };
   }, [db]);
   const mutate = (fn) => setDb((d) => fn(typeof structuredClone === "function" ? structuredClone(d) : JSON.parse(JSON.stringify(d))));
   const actions = useMemo(() => ({
@@ -1049,6 +1104,46 @@ function App() {
       });
       toast(action === "Dispatched" ? "Marked dispatched" : "Reverted to pending");
     },
+    savePurchaseReturn: async (payload) => {
+      const res = await gs("apiSavePurchaseReturn", JSON.stringify(payload));
+      mutate((d) => {
+        const i = d.purchaseReturns.findIndex((x) => x.id === res.purchaseReturn.id);
+        i >= 0 ? d.purchaseReturns[i] = res.purchaseReturn : d.purchaseReturns.push(res.purchaseReturn);
+        d.purchaseReturnItems = d.purchaseReturnItems.filter((l) => l.purchaseReturnId !== res.purchaseReturn.id).concat(res.items);
+        const deltas = {};
+        res.items.forEach((l) => {
+          if (l.itemId) deltas[l.itemId] = (deltas[l.itemId] || 0) - n2(l.qty);
+        });
+        d.items.forEach((it) => {
+          if (deltas[it.id]) it.stock = n2(it.stock) + deltas[it.id];
+        });
+        if (n2(res.purchaseReturn.total) > 0 && res.purchaseReturn.sourceId) {
+          const pIdx = d.payments.findIndex((x) => x.id === res.purchaseReturn.id);
+          const paymentRow = { id: res.purchaseReturn.id, date: res.purchaseReturn.date, partyId: res.purchaseReturn.partyId, partyName: res.purchaseReturn.partyName, refType: "PurchaseReturn", refId: res.purchaseReturn.sourceId, amount: n2(res.purchaseReturn.total), mode: res.purchaseReturn.prNo, direction: "Out", notes: "Goods returned to supplier, return " + res.purchaseReturn.prNo };
+          pIdx >= 0 ? d.payments[pIdx] = paymentRow : d.payments.push(paymentRow);
+        }
+        return d;
+      });
+      toast(`Purchase Return ${res.purchaseReturn.prNo} saved ✓ Stock updated`);
+      return res;
+    },
+    deletePurchaseReturn: async (id) => {
+      mutate((d) => {
+        const deltas = {};
+        d.purchaseReturnItems.filter((l) => l.purchaseReturnId === id).forEach((l) => {
+          if (l.itemId) deltas[l.itemId] = (deltas[l.itemId] || 0) + n2(l.qty);
+        });
+        d.items.forEach((it) => {
+          if (deltas[it.id]) it.stock = n2(it.stock) + deltas[it.id];
+        });
+        d.purchaseReturnItems = d.purchaseReturnItems.filter((l) => l.purchaseReturnId !== id);
+        d.payments = d.payments.filter((x) => x.id !== id);
+        d.purchaseReturns = d.purchaseReturns.filter((x) => x.id !== id);
+        return d;
+      });
+      await gs("apiDeletePurchaseReturn", id);
+      toast("Purchase Return deleted");
+    },
     uploadVisitingCard: async (party, file) => {
       const base64 = await new Promise((resolve, reject) => {
         const reader = new FileReader();
@@ -1197,6 +1292,8 @@ function App() {
     "payments": /* @__PURE__ */ React.createElement(PaymentsPage, { ...ctx, ...pageProps }),
     "new-purchase": /* @__PURE__ */ React.createElement(NewPurchase, { ...ctx, ...pageProps, key: pageProps.editId || "newp" }),
     "purchases": /* @__PURE__ */ React.createElement(PurchaseList, { ...ctx }),
+    "purchase-returns": /* @__PURE__ */ React.createElement(PurchaseReturnsList, { ...ctx }),
+    "new-purchase-return": /* @__PURE__ */ React.createElement(NewPurchaseReturn, { ...ctx, ...pageProps, key: pageProps.purchaseId || "new-pr" }),
     "items": /* @__PURE__ */ React.createElement(ItemsPage, { ...ctx }),
     "parties": /* @__PURE__ */ React.createElement(PartiesPage, { ...ctx }),
     "party-detail": /* @__PURE__ */ React.createElement(PartyDetail, { ...ctx, ...pageProps, key: pageProps.partyId || "party" }),
@@ -1625,6 +1722,7 @@ function NewPurchase({ db, derived, actions, go, S, editId }) {
   const [partyId, setPartyId] = useState(editing ? editing.partyId : "");
   const [lines, setLines] = useState(editing ? editLines.map((l) => ({ key: uid(), itemId: l.itemId, name: l.name, qty: l.qty, rate: l.rate })) : [emptyPLine(), emptyPLine()]);
   const [other, setOther] = useState(editing ? n2(editing.other) : 0);
+  const [supplierInvoiceNo, setSupplierInvoiceNo] = useState(editing ? editing.supplierInvoiceNo || "" : "");
   const [paidNow, setPaidNow] = useState("");
   const [payMode, setPayMode] = useState(S.payModes[0] || "Cash");
   const [notes, setNotes] = useState(editing ? editing.notes || "" : "");
@@ -1672,6 +1770,7 @@ function NewPurchase({ db, derived, actions, go, S, editId }) {
           other: n2(other),
           total,
           payMode,
+          supplierInvoiceNo: supplierInvoiceNo.trim(),
           notes,
           createdAt: editing ? editing.createdAt : ""
         },
@@ -1699,13 +1798,14 @@ function NewPurchase({ db, derived, actions, go, S, editId }) {
     setPartyId("");
     setLines(newLines);
     setOther(0);
+    setSupplierInvoiceNo("");
     setPaidNow("");
     setNotes("");
     focusCell(newLines[0].key, "name");
   };
   const cellCls = "w-full px-2 py-1.5 text-[13px] bg-zinc-800 border border-zinc-700 text-zinc-100 rounded-md focus:border-red-500 focus:ring-2 focus:ring-red-500/30";
   const gridCols = "grid grid-cols-[34px_minmax(200px,2fr)_84px_100px_110px_34px] gap-1.5 items-center";
-  return /* @__PURE__ */ React.createElement("div", { className: "anim-in" }, /* @__PURE__ */ React.createElement(PageHead, { title: editing ? `Edit ${editing.billNo}` : "New Purchase", sub: "Stock IN \u2014 item cost auto-updates to last purchase rate", right: /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "sm", onClick: () => go("purchases") }, "\u2190 Purchase List") }), /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800 p-4 mb-3 grid md:grid-cols-3 gap-3" }, /* @__PURE__ */ React.createElement(Field, { label: "Supplier" }, /* @__PURE__ */ React.createElement(
+  return /* @__PURE__ */ React.createElement("div", { className: "anim-in" }, /* @__PURE__ */ React.createElement(PageHead, { title: editing ? `Edit ${editing.billNo}` : "New Purchase", sub: "Stock IN \u2014 item cost auto-updates to last purchase rate", right: /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "sm", onClick: () => go("purchases") }, "\u2190 Purchase List") }), /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800 p-4 mb-3 grid md:grid-cols-4 gap-3" }, /* @__PURE__ */ React.createElement(Field, { label: "Supplier" }, /* @__PURE__ */ React.createElement(
     AutoComplete,
     {
       value: partyName,
@@ -1722,7 +1822,7 @@ function NewPurchase({ db, derived, actions, go, S, editId }) {
       onCreate: quickCreateSupplier,
       placeholder: "Search or add supplier\u2026"
     }
-  )), /* @__PURE__ */ React.createElement(Field, { label: "Bill date" }, /* @__PURE__ */ React.createElement(Input, { type: "date", value: date, onChange: (e) => setDate(e.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Notes / Bill ref" }, /* @__PURE__ */ React.createElement(Input, { value: notes, onChange: (e) => setNotes(e.target.value), placeholder: "Supplier bill no, transport\u2026" }))), /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800 p-4 mb-3 overflow-x-auto" }, /* @__PURE__ */ React.createElement("div", { className: "min-w-[600px]" }, /* @__PURE__ */ React.createElement("div", { className: `${gridCols} pb-2 border-b border-zinc-800 mb-2 text-[10px] font-bold uppercase tracking-wide text-zinc-500` }, /* @__PURE__ */ React.createElement("div", null, "Sr"), /* @__PURE__ */ React.createElement("div", null, "Item"), /* @__PURE__ */ React.createElement("div", { className: "text-center" }, "Qty"), /* @__PURE__ */ React.createElement("div", { className: "text-right" }, "Rate"), /* @__PURE__ */ React.createElement("div", { className: "text-right" }, "Amount"), /* @__PURE__ */ React.createElement("div", null)), lines.map((l, idx) => {
+  )), /* @__PURE__ */ React.createElement(Field, { label: "Bill date" }, /* @__PURE__ */ React.createElement(Input, { type: "date", value: date, onChange: (e) => setDate(e.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Supplier invoice no" }, /* @__PURE__ */ React.createElement(Input, { value: supplierInvoiceNo, onChange: (e) => setSupplierInvoiceNo(e.target.value), placeholder: "Their bill/invoice no\u2026" })), /* @__PURE__ */ React.createElement(Field, { label: "Notes" }, /* @__PURE__ */ React.createElement(Input, { value: notes, onChange: (e) => setNotes(e.target.value), placeholder: "Transport, remarks\u2026" }))), /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800 p-4 mb-3 overflow-x-auto" }, /* @__PURE__ */ React.createElement("div", { className: "min-w-[600px]" }, /* @__PURE__ */ React.createElement("div", { className: `${gridCols} pb-2 border-b border-zinc-800 mb-2 text-[10px] font-bold uppercase tracking-wide text-zinc-500` }, /* @__PURE__ */ React.createElement("div", null, "Sr"), /* @__PURE__ */ React.createElement("div", null, "Item"), /* @__PURE__ */ React.createElement("div", { className: "text-center" }, "Qty"), /* @__PURE__ */ React.createElement("div", { className: "text-right" }, "Rate"), /* @__PURE__ */ React.createElement("div", { className: "text-right" }, "Amount"), /* @__PURE__ */ React.createElement("div", null)), lines.map((l, idx) => {
     const item = derived.itemMap[l.itemId];
     return /* @__PURE__ */ React.createElement("div", { key: l.key, className: `${gridCols} mb-1.5` }, /* @__PURE__ */ React.createElement("div", { className: "text-xs text-zinc-500 num text-center" }, idx + 1), /* @__PURE__ */ React.createElement(
       AutoComplete,
@@ -1758,15 +1858,77 @@ function PurchaseList({ db, derived, actions, go, S }) {
     let list = [...db.purchases].sort((a, b) => String(b.createdAt || b.date).localeCompare(String(a.createdAt || a.date)));
     if (q.trim()) {
       const s = clamp(q);
-      list = list.filter((p) => clamp(p.partyName).includes(s) || clamp(p.billNo).includes(s));
+      list = list.filter((p) => clamp(p.partyName).includes(s) || clamp(p.billNo).includes(s) || clamp(p.supplierInvoiceNo).includes(s));
     }
     return list;
   }, [db.purchases, q]);
-  return /* @__PURE__ */ React.createElement("div", { className: "anim-in" }, /* @__PURE__ */ React.createElement(PageHead, { title: "Purchase List", sub: `${rows.length} bills \xB7 Total ${fmt(rows.reduce((s, p) => s + n2(p.total), 0), cur)}`, right: /* @__PURE__ */ React.createElement(Btn, { kind: "brand", onClick: () => go("new-purchase") }, "+ New Purchase") }), /* @__PURE__ */ React.createElement(Input, { value: q, onChange: (e) => setQ(e.target.value), placeholder: "\u{1F50D} Search supplier / bill no\u2026", className: "!w-64 mb-3" }), rows.length === 0 ? /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800" }, /* @__PURE__ */ React.createElement(Empty, { icon: "\u{1F4E6}", msg: "No purchases yet.", action: /* @__PURE__ */ React.createElement(Btn, { kind: "brand", size: "sm", onClick: () => go("new-purchase") }, "Add Purchase") })) : /* @__PURE__ */ React.createElement(Table, { head: ["Bill", "Date", "Supplier", { t: "Total", right: true }, { t: "Paid", right: true }, { t: "Balance", right: true }, ""] }, rows.map((p) => {
+  return /* @__PURE__ */ React.createElement("div", { className: "anim-in" }, /* @__PURE__ */ React.createElement(PageHead, { title: "Purchase List", sub: `${rows.length} bills \xB7 Total ${fmt(rows.reduce((s, p) => s + n2(p.total), 0), cur)}`, right: /* @__PURE__ */ React.createElement(Btn, { kind: "brand", onClick: () => go("new-purchase") }, "+ New Purchase") }), /* @__PURE__ */ React.createElement(Input, { value: q, onChange: (e) => setQ(e.target.value), placeholder: "\u{1F50D} Search supplier / bill no / supplier invoice no\u2026", className: "!w-64 mb-3" }), rows.length === 0 ? /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800" }, /* @__PURE__ */ React.createElement(Empty, { icon: "\u{1F4E6}", msg: "No purchases yet.", action: /* @__PURE__ */ React.createElement(Btn, { kind: "brand", size: "sm", onClick: () => go("new-purchase") }, "Add Purchase") })) : /* @__PURE__ */ React.createElement(Table, { head: ["Bill", "Date", "Supplier", { t: "Total", right: true }, { t: "Paid", right: true }, { t: "Balance", right: true }, ""] }, rows.map((p) => {
     const paid = derived.paidByRef[p.id] || 0;
     const bal = n2(p.total) - paid;
     return /* @__PURE__ */ React.createElement("tr", { key: p.id, className: "hover:bg-zinc-800/60 cursor-pointer", onClick: () => setView(p) }, /* @__PURE__ */ React.createElement(Td, { className: "font-semibold" }, p.billNo), /* @__PURE__ */ React.createElement(Td, { className: "text-zinc-400 whitespace-nowrap" }, fdate(p.date)), /* @__PURE__ */ React.createElement(Td, null, p.partyName), /* @__PURE__ */ React.createElement(Td, { right: true, className: "font-bold" }, fmt(p.total, cur)), /* @__PURE__ */ React.createElement(Td, { right: true, className: "text-emerald-400" }, fmt(paid, cur)), /* @__PURE__ */ React.createElement(Td, { right: true, className: bal > 0.01 ? "text-red-400 font-semibold" : "text-zinc-600" }, bal > 0.01 ? fmt(bal, cur) : "\u2014"), /* @__PURE__ */ React.createElement(Td, { onClick: (e) => e.stopPropagation() }, /* @__PURE__ */ React.createElement("div", { className: "flex gap-1 justify-end" }, /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "xs", onClick: () => go("new-purchase", { editId: p.id }) }, "\u270E"), /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "xs", className: "!text-red-400", onClick: () => setConfirm(p) }, "\u{1F5D1}"))));
-  })), view && /* @__PURE__ */ React.createElement(Modal, { title: `Purchase ${view.billNo}`, onClose: () => setView(null), wide: true }, /* @__PURE__ */ React.createElement("div", { className: "mb-3" }, /* @__PURE__ */ React.createElement("b", null, view.partyName), " ", /* @__PURE__ */ React.createElement("span", { className: "text-xs text-zinc-500" }, "\xB7 ", fdate(view.date))), /* @__PURE__ */ React.createElement(Table, { head: ["#", "Item", { t: "Qty", right: true }, { t: "Rate", right: true }, { t: "Amount", right: true }] }, (derived.linesByPurchase[view.id] || []).map((l, i) => /* @__PURE__ */ React.createElement("tr", { key: l.id }, /* @__PURE__ */ React.createElement(Td, null, i + 1), /* @__PURE__ */ React.createElement(Td, { className: "font-medium" }, l.name), /* @__PURE__ */ React.createElement(Td, { right: true }, fq(l.qty)), /* @__PURE__ */ React.createElement(Td, { right: true }, fmt(l.rate, cur)), /* @__PURE__ */ React.createElement(Td, { right: true, className: "font-bold" }, fmt(l.amount, cur))))), /* @__PURE__ */ React.createElement("div", { className: "text-right mt-3 font-extrabold" }, "Total: ", /* @__PURE__ */ React.createElement("span", { className: "num" }, fmt(view.total, cur)))), confirm && /* @__PURE__ */ React.createElement(Confirm, { msg: `Delete purchase ${confirm.billNo}? Stock will be reversed.`, onYes: () => actions.deletePurchase(confirm.id), onClose: () => setConfirm(null) }));
+  })), view && /* @__PURE__ */ React.createElement(Modal, { title: `Purchase ${view.billNo}`, onClose: () => setView(null), wide: true }, /* @__PURE__ */ React.createElement("div", { className: "mb-3" }, /* @__PURE__ */ React.createElement("b", null, view.partyName), " ", /* @__PURE__ */ React.createElement("span", { className: "text-xs text-zinc-500" }, "\xB7 ", fdate(view.date)), view.supplierInvoiceNo && /* @__PURE__ */ React.createElement("span", { className: "text-xs text-zinc-500" }, " \xB7 their inv# ", view.supplierInvoiceNo)), /* @__PURE__ */ React.createElement(Table, { head: ["#", "Item", { t: "Qty", right: true }, { t: "Rate", right: true }, { t: "Amount", right: true }] }, (derived.linesByPurchase[view.id] || []).map((l, i) => /* @__PURE__ */ React.createElement("tr", { key: l.id }, /* @__PURE__ */ React.createElement(Td, null, i + 1), /* @__PURE__ */ React.createElement(Td, { className: "font-medium" }, l.name), /* @__PURE__ */ React.createElement(Td, { right: true }, fq(l.qty)), /* @__PURE__ */ React.createElement(Td, { right: true }, fmt(l.rate, cur)), /* @__PURE__ */ React.createElement(Td, { right: true, className: "font-bold" }, fmt(l.amount, cur))))), /* @__PURE__ */ React.createElement("div", { className: "flex items-center justify-between mt-3" }, /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "sm", onClick: () => { const v = view; setView(null); go("new-purchase-return", { purchaseId: v.id }); } }, "↩️ Purchase Return"), /* @__PURE__ */ React.createElement("div", { className: "text-right font-extrabold" }, "Total: ", /* @__PURE__ */ React.createElement("span", { className: "num" }, fmt(view.total, cur))))), confirm && /* @__PURE__ */ React.createElement(Confirm, { msg: `Delete purchase ${confirm.billNo}? Stock will be reversed.`, onYes: () => actions.deletePurchase(confirm.id), onClose: () => setConfirm(null) }));
+}
+/**
+ * Purchase Return against an existing purchase bill (Module 6). Mirrors NewSalesReturn
+ * exactly but reversed: stock goes OUT (goods sent back to the supplier) and the
+ * refund reduces what we owe the supplier via a Payments-sheet debit, same trick as
+ * Sales Return (a synthetic Payments row keyed by the return's own id).
+ */
+function NewPurchaseReturn({ db, derived, actions, go, S, purchaseId }) {
+  const cur = S.currency;
+  const purchase = db.purchases.find((p) => p.id === purchaseId);
+  const purchaseLines = derived.linesByPurchase[purchaseId] || [];
+  const [qtys, setQtys] = useState({});
+  const [notes, setNotes] = useState("");
+  const [saving, setSaving] = useState(false);
+  if (!purchase) {
+    return /* @__PURE__ */ React.createElement("div", { className: "anim-in" }, /* @__PURE__ */ React.createElement(PageHead, { title: "Purchase not found", right: /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "sm", onClick: () => go("purchases") }, "← Purchase List") }));
+  }
+  const rows = purchaseLines.map((l) => {
+    const returned = derived.returnedQtyByPurchaseItem[l.id] || 0;
+    const remaining = Math.max(0, n2(l.qty) - returned);
+    const retQty = n2(qtys[l.id] || 0);
+    return { ...l, returned, remaining, retQty, amount: retQty * n2(l.rate) };
+  });
+  const total = rows.reduce((s, r) => s + r.amount, 0);
+  const setQty = (lineId, v, max) => {
+    const capped = v === "" ? "" : String(Math.min(Math.max(n2(v), 0), max));
+    setQtys((q) => ({ ...q, [lineId]: capped }));
+  };
+  const save = async () => {
+    const items = rows.filter((r) => r.retQty > 0).map((r) => ({ purchaseItemId: r.id, itemId: r.itemId, name: r.name, qty: r.retQty, rate: n2(r.rate), amount: r.amount }));
+    if (!items.length) {
+      toast("Enter a return quantity for at least one line", "warn");
+      return;
+    }
+    setSaving(true);
+    try {
+      await actions.savePurchaseReturn({
+        purchaseReturn: { id: "", date: today(), partyId: purchase.partyId, partyName: purchase.partyName, subTotal: total, taxAmt: 0, total, notes, sourceType: "Purchase", sourceId: purchase.id },
+        items
+      });
+      go("purchase-returns");
+    } catch (e) {
+      toast("Save failed: " + (e.message || e), "err");
+    }
+    setSaving(false);
+  };
+  return /* @__PURE__ */ React.createElement("div", { className: "anim-in" }, /* @__PURE__ */ React.createElement(PageHead, { title: `Purchase Return — ${purchase.billNo}`, sub: `${purchase.partyName} \xB7 ${fdate(purchase.date)}`, right: /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "sm", onClick: () => go("purchases") }, "← Purchase List") }), /* @__PURE__ */ React.createElement(Table, { head: ["Item", { t: "Purchased", right: true }, { t: "Returned", right: true }, { t: "Returnable", right: true }, { t: "Return Qty", right: true }, { t: "Amount", right: true }] }, rows.map((r) => /* @__PURE__ */ React.createElement("tr", { key: r.id }, /* @__PURE__ */ React.createElement(Td, { className: "font-medium" }, r.name), /* @__PURE__ */ React.createElement(Td, { right: true }, fq(r.qty)), /* @__PURE__ */ React.createElement(Td, { right: true, className: "text-zinc-500" }, r.returned > 0 ? fq(r.returned) : "—"), /* @__PURE__ */ React.createElement(Td, { right: true, className: r.remaining <= 0 ? "text-zinc-600" : "text-emerald-400" }, fq(r.remaining)), /* @__PURE__ */ React.createElement(Td, { right: true }, /* @__PURE__ */ React.createElement("input", { value: qtys[r.id] ?? "", onChange: (e) => setQty(r.id, e.target.value, r.remaining), disabled: r.remaining <= 0, inputMode: "decimal", className: "w-20 px-2 py-1 text-right text-sm bg-zinc-800 border border-zinc-700 text-zinc-100 rounded-md focus:border-red-500 focus:ring-2 focus:ring-red-500/30 num disabled:opacity-40", placeholder: "0" })), /* @__PURE__ */ React.createElement(Td, { right: true, className: "font-bold" }, r.amount > 0 ? fmt(r.amount, cur) : "—")))), /* @__PURE__ */ React.createElement("div", { className: "max-w-sm ml-auto bg-zinc-900 rounded-xl border border-zinc-800 p-4 mt-4" }, /* @__PURE__ */ React.createElement(Field, { label: "Notes" }, /* @__PURE__ */ React.createElement(Input, { value: notes, onChange: (e) => setNotes(e.target.value), placeholder: "Reason for return…" })), /* @__PURE__ */ React.createElement("div", { className: "flex justify-between text-base py-2 mt-3 border-t border-zinc-800 font-extrabold text-zinc-100" }, /* @__PURE__ */ React.createElement("span", null, "REFUND TOTAL"), /* @__PURE__ */ React.createElement("span", { className: "num" }, fmt(total, cur))), /* @__PURE__ */ React.createElement(Btn, { kind: "brand", className: "w-full mt-2", disabled: saving || total <= 0, onClick: save }, saving ? "Saving…" : "Save Purchase Return")));
+}
+function PurchaseReturnsList({ db, derived, actions, go, S }) {
+  const cur = S.currency;
+  const [q, setQ] = useState("");
+  const [confirm, setConfirm] = useState(null);
+  const [view, setView] = useState(null);
+  const rows = useMemo(() => {
+    let list = [...db.purchaseReturns].sort((a, b) => String(b.createdAt || b.date).localeCompare(String(a.createdAt || a.date)));
+    if (q.trim()) {
+      const s = clamp(q);
+      list = list.filter((r) => clamp(r.partyName).includes(s) || clamp(r.prNo).includes(s));
+    }
+    return list;
+  }, [db.purchaseReturns, q]);
+  return /* @__PURE__ */ React.createElement("div", { className: "anim-in" }, /* @__PURE__ */ React.createElement(PageHead, { title: "Purchase Returns", sub: `${rows.length} returns \xB7 Started from a purchase bill's "Purchase Return" button` }), /* @__PURE__ */ React.createElement(Input, { value: q, onChange: (e) => setQ(e.target.value), placeholder: "🔍 Search supplier / return no…", className: "!w-64 mb-3" }), rows.length === 0 ? /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800" }, /* @__PURE__ */ React.createElement(Empty, { icon: "↩️", msg: "No purchase returns yet. Open a purchase bill and click “Purchase Return”." })) : /* @__PURE__ */ React.createElement(Table, { head: ["Return", "Date", "Supplier", { t: "Total", right: true }, ""] }, rows.map((r) => /* @__PURE__ */ React.createElement("tr", { key: r.id, className: "hover:bg-zinc-800/60 cursor-pointer", onClick: () => setView(r) }, /* @__PURE__ */ React.createElement(Td, { className: "font-semibold" }, r.prNo), /* @__PURE__ */ React.createElement(Td, { className: "text-zinc-400 whitespace-nowrap" }, fdate(r.date)), /* @__PURE__ */ React.createElement(Td, null, r.partyName), /* @__PURE__ */ React.createElement(Td, { right: true, className: "font-bold" }, fmt(r.total, cur)), /* @__PURE__ */ React.createElement(Td, { onClick: (e) => e.stopPropagation() }, /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", size: "xs", className: "!text-red-400", onClick: () => setConfirm(r) }, "\u{1F5D1}"))))), view && /* @__PURE__ */ React.createElement(Modal, { title: `Purchase Return ${view.prNo}`, onClose: () => setView(null), wide: true }, /* @__PURE__ */ React.createElement("div", { className: "mb-3" }, /* @__PURE__ */ React.createElement("b", null, view.partyName), " ", /* @__PURE__ */ React.createElement("span", { className: "text-xs text-zinc-500" }, "\xB7 ", fdate(view.date))), /* @__PURE__ */ React.createElement(Table, { head: ["#", "Item", { t: "Qty", right: true }, { t: "Rate", right: true }, { t: "Amount", right: true }] }, (derived.linesByPurchaseReturn[view.id] || []).map((l, i) => /* @__PURE__ */ React.createElement("tr", { key: l.id }, /* @__PURE__ */ React.createElement(Td, null, i + 1), /* @__PURE__ */ React.createElement(Td, { className: "font-medium" }, l.name), /* @__PURE__ */ React.createElement(Td, { right: true }, fq(l.qty)), /* @__PURE__ */ React.createElement(Td, { right: true }, fmt(l.rate, cur)), /* @__PURE__ */ React.createElement(Td, { right: true, className: "font-bold" }, fmt(l.amount, cur))))), /* @__PURE__ */ React.createElement("div", { className: "text-right mt-3 font-extrabold" }, "Refund total: ", /* @__PURE__ */ React.createElement("span", { className: "num" }, fmt(view.total, cur)))), confirm && /* @__PURE__ */ React.createElement(Confirm, { msg: `Delete return ${confirm.prNo}? Stock will be reversed and the supplier's balance will go back up.`, onYes: () => actions.deletePurchaseReturn(confirm.id), onClose: () => setConfirm(null) }));
 }
 /**
  * Shared entry form for Quotations and Sales Orders (Module 4). The two are
@@ -2388,7 +2550,7 @@ function SettingsPage({ db, actions, S }) {
     actions.saveSettings(clean);
   };
   const Sec = ({ title, children }) => /* @__PURE__ */ React.createElement("div", { className: "bg-zinc-900 rounded-xl border border-zinc-800 p-4 mb-4" }, /* @__PURE__ */ React.createElement("h3", { className: "text-xs font-bold uppercase tracking-wide text-zinc-500 mb-3" }, title), children);
-  return /* @__PURE__ */ React.createElement("div", { className: "anim-in max-w-2xl" }, /* @__PURE__ */ React.createElement(PageHead, { title: "Settings", right: /* @__PURE__ */ React.createElement(Btn, { kind: "brand", onClick: save }, "Save Settings") }), /* @__PURE__ */ React.createElement(Sec, { title: "Business profile (shown on invoices)" }, /* @__PURE__ */ React.createElement("div", { className: "space-y-3" }, /* @__PURE__ */ React.createElement(Field, { label: "Business name" }, /* @__PURE__ */ React.createElement(Input, { value: f.bizName, onChange: (e) => set("bizName", e.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Tagline" }, /* @__PURE__ */ React.createElement(Input, { value: f.bizTagline, onChange: (e) => set("bizTagline", e.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Address" }, /* @__PURE__ */ React.createElement(Input, { value: f.bizAddress, onChange: (e) => set("bizAddress", e.target.value) })), /* @__PURE__ */ React.createElement("div", { className: "grid grid-cols-2 gap-3" }, /* @__PURE__ */ React.createElement(Field, { label: "Phone" }, /* @__PURE__ */ React.createElement(Input, { value: f.bizPhone, onChange: (e) => set("bizPhone", e.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Email" }, /* @__PURE__ */ React.createElement(Input, { value: f.bizEmail, onChange: (e) => set("bizEmail", e.target.value) }))), /* @__PURE__ */ React.createElement(Field, { label: "GSTIN (optional)" }, /* @__PURE__ */ React.createElement(Input, { value: f.bizGstin, onChange: (e) => set("bizGstin", e.target.value) })))), /* @__PURE__ */ React.createElement(Sec, { title: "Billing" }, /* @__PURE__ */ React.createElement("div", { className: "grid grid-cols-2 gap-3 mb-3" }, /* @__PURE__ */ React.createElement(Field, { label: "Invoice number prefix" }, /* @__PURE__ */ React.createElement(Input, { value: f.invPrefix, onChange: (e) => set("invPrefix", e.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Purchase bill prefix" }, /* @__PURE__ */ React.createElement(Input, { value: f.purPrefix, onChange: (e) => set("purPrefix", e.target.value) }))), /* @__PURE__ */ React.createElement("div", { className: "grid grid-cols-3 gap-3 mb-3" }, /* @__PURE__ */ React.createElement(Field, { label: "Quotation prefix" }, /* @__PURE__ */ React.createElement(Input, { value: f.quoPrefix, onChange: (e) => set("quoPrefix", e.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Sales Order prefix" }, /* @__PURE__ */ React.createElement(Input, { value: f.soPrefix, onChange: (e) => set("soPrefix", e.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Sales Return prefix" }, /* @__PURE__ */ React.createElement(Input, { value: f.srPrefix, onChange: (e) => set("srPrefix", e.target.value) }))), /* @__PURE__ */ React.createElement("div", { className: "grid grid-cols-3 gap-3 mb-3" }, /* @__PURE__ */ React.createElement(Field, { label: "Currency symbol" }, /* @__PURE__ */ React.createElement(Input, { value: f.currency, onChange: (e) => set("currency", e.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Tax label" }, /* @__PURE__ */ React.createElement(Input, { value: f.taxLabel, onChange: (e) => set("taxLabel", e.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Tax %" }, /* @__PURE__ */ React.createElement(Input, { value: f.taxPct, onChange: (e) => set("taxPct", e.target.value), inputMode: "decimal" }))), /* @__PURE__ */ React.createElement("label", { className: "flex items-center gap-2 text-sm mb-3" }, /* @__PURE__ */ React.createElement("input", { type: "checkbox", checked: !!f.taxEnabled, onChange: (e) => set("taxEnabled", e.target.checked) }), " Tax ON by default for new invoices"), /* @__PURE__ */ React.createElement("label", { className: "flex items-center gap-2 text-sm" }, /* @__PURE__ */ React.createElement("input", { type: "checkbox", checked: !!f.lowStockAlert, onChange: (e) => set("lowStockAlert", e.target.checked) }), " Show low-stock alerts on dashboard")), /* @__PURE__ */ React.createElement(Sec, { title: "Customisation" }, /* @__PURE__ */ React.createElement("div", { className: "space-y-3" }, /* @__PURE__ */ React.createElement(Field, { label: "Units (comma separated)" }, /* @__PURE__ */ React.createElement(Input, { value: unitsText, onChange: (e) => setUnitsText(e.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Payment modes (comma separated)" }, /* @__PURE__ */ React.createElement(Input, { value: modesText, onChange: (e) => setModesText(e.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Invoice footer note" }, /* @__PURE__ */ React.createElement(Input, { value: f.invoiceFooter, onChange: (e) => set("invoiceFooter", e.target.value) })))), /* @__PURE__ */ React.createElement(Sec, { title: "Data" }, /* @__PURE__ */ React.createElement("div", { className: "flex flex-wrap gap-2" }, /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", onClick: () => exportCSV(db, S) }, "\u2B07 Export all data (CSV)"), /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", onClick: actions.reload }, "\u21BB Reload from Google Sheets")), /* @__PURE__ */ React.createElement("p", { className: "text-[11px] text-zinc-500 mt-2" }, IS_GAS ? "Your Google Sheet IS your backup \u2014 every record lives there. You can also use File \u2192 Make a copy in Sheets for snapshots." : "Local preview mode: data is in this browser only. Deploy to Apps Script to store in Google Sheets.")));
+  return /* @__PURE__ */ React.createElement("div", { className: "anim-in max-w-2xl" }, /* @__PURE__ */ React.createElement(PageHead, { title: "Settings", right: /* @__PURE__ */ React.createElement(Btn, { kind: "brand", onClick: save }, "Save Settings") }), /* @__PURE__ */ React.createElement(Sec, { title: "Business profile (shown on invoices)" }, /* @__PURE__ */ React.createElement("div", { className: "space-y-3" }, /* @__PURE__ */ React.createElement(Field, { label: "Business name" }, /* @__PURE__ */ React.createElement(Input, { value: f.bizName, onChange: (e) => set("bizName", e.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Tagline" }, /* @__PURE__ */ React.createElement(Input, { value: f.bizTagline, onChange: (e) => set("bizTagline", e.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Address" }, /* @__PURE__ */ React.createElement(Input, { value: f.bizAddress, onChange: (e) => set("bizAddress", e.target.value) })), /* @__PURE__ */ React.createElement("div", { className: "grid grid-cols-2 gap-3" }, /* @__PURE__ */ React.createElement(Field, { label: "Phone" }, /* @__PURE__ */ React.createElement(Input, { value: f.bizPhone, onChange: (e) => set("bizPhone", e.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Email" }, /* @__PURE__ */ React.createElement(Input, { value: f.bizEmail, onChange: (e) => set("bizEmail", e.target.value) }))), /* @__PURE__ */ React.createElement(Field, { label: "GSTIN (optional)" }, /* @__PURE__ */ React.createElement(Input, { value: f.bizGstin, onChange: (e) => set("bizGstin", e.target.value) })))), /* @__PURE__ */ React.createElement(Sec, { title: "Billing" }, /* @__PURE__ */ React.createElement("div", { className: "grid grid-cols-2 gap-3 mb-3" }, /* @__PURE__ */ React.createElement(Field, { label: "Invoice number prefix" }, /* @__PURE__ */ React.createElement(Input, { value: f.invPrefix, onChange: (e) => set("invPrefix", e.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Purchase bill prefix" }, /* @__PURE__ */ React.createElement(Input, { value: f.purPrefix, onChange: (e) => set("purPrefix", e.target.value) }))), /* @__PURE__ */ React.createElement("div", { className: "grid grid-cols-2 md:grid-cols-4 gap-3 mb-3" }, /* @__PURE__ */ React.createElement(Field, { label: "Quotation prefix" }, /* @__PURE__ */ React.createElement(Input, { value: f.quoPrefix, onChange: (e) => set("quoPrefix", e.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Sales Order prefix" }, /* @__PURE__ */ React.createElement(Input, { value: f.soPrefix, onChange: (e) => set("soPrefix", e.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Sales Return prefix" }, /* @__PURE__ */ React.createElement(Input, { value: f.srPrefix, onChange: (e) => set("srPrefix", e.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Purchase Return prefix" }, /* @__PURE__ */ React.createElement(Input, { value: f.prPrefix, onChange: (e) => set("prPrefix", e.target.value) }))), /* @__PURE__ */ React.createElement("div", { className: "grid grid-cols-3 gap-3 mb-3" }, /* @__PURE__ */ React.createElement(Field, { label: "Currency symbol" }, /* @__PURE__ */ React.createElement(Input, { value: f.currency, onChange: (e) => set("currency", e.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Tax label" }, /* @__PURE__ */ React.createElement(Input, { value: f.taxLabel, onChange: (e) => set("taxLabel", e.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Tax %" }, /* @__PURE__ */ React.createElement(Input, { value: f.taxPct, onChange: (e) => set("taxPct", e.target.value), inputMode: "decimal" }))), /* @__PURE__ */ React.createElement("label", { className: "flex items-center gap-2 text-sm mb-3" }, /* @__PURE__ */ React.createElement("input", { type: "checkbox", checked: !!f.taxEnabled, onChange: (e) => set("taxEnabled", e.target.checked) }), " Tax ON by default for new invoices"), /* @__PURE__ */ React.createElement("label", { className: "flex items-center gap-2 text-sm" }, /* @__PURE__ */ React.createElement("input", { type: "checkbox", checked: !!f.lowStockAlert, onChange: (e) => set("lowStockAlert", e.target.checked) }), " Show low-stock alerts on dashboard")), /* @__PURE__ */ React.createElement(Sec, { title: "Customisation" }, /* @__PURE__ */ React.createElement("div", { className: "space-y-3" }, /* @__PURE__ */ React.createElement(Field, { label: "Units (comma separated)" }, /* @__PURE__ */ React.createElement(Input, { value: unitsText, onChange: (e) => setUnitsText(e.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Payment modes (comma separated)" }, /* @__PURE__ */ React.createElement(Input, { value: modesText, onChange: (e) => setModesText(e.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Invoice footer note" }, /* @__PURE__ */ React.createElement(Input, { value: f.invoiceFooter, onChange: (e) => set("invoiceFooter", e.target.value) })))), /* @__PURE__ */ React.createElement(Sec, { title: "Data" }, /* @__PURE__ */ React.createElement("div", { className: "flex flex-wrap gap-2" }, /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", onClick: () => exportCSV(db, S) }, "\u2B07 Export all data (CSV)"), /* @__PURE__ */ React.createElement(Btn, { kind: "ghost", onClick: actions.reload }, "\u21BB Reload from Google Sheets")), /* @__PURE__ */ React.createElement("p", { className: "text-[11px] text-zinc-500 mt-2" }, IS_GAS ? "Your Google Sheet IS your backup \u2014 every record lives there. You can also use File \u2192 Make a copy in Sheets for snapshots." : "Local preview mode: data is in this browser only. Deploy to Apps Script to store in Google Sheets.")));
 }
 function exportCSV(db, S) {
   const esc = (v) => `"${String(v != null ? v : "").replace(/"/g, '""')}"`;

@@ -15,7 +15,7 @@ Resume rule: read this file, find the first module NOT marked `[DONE]`, start th
 - [DONE] Module 3 — Opening Bills (OpeningBalances) — 2026-07-04
 - [DONE] Module 4 — Sales Suite (Quotation → SO → Invoice → Return) — 2026-07-04
 - [DONE] Module 5 — Dispatch Tracking + Cash/Credit Sale Type + Payment Risk Alert — 2026-07-04
-- [ ] Module 6 — Purchase Suite (Purchase Return + supplier bill matching)
+- [DONE] Module 6 — Purchase Suite (Purchase Return + supplier bill matching) — 2026-07-04
 - [ ] Module 7 — Bulk Payment Entry
 - [ ] Module 8 — Products, Categories, Brands, Stock Ledger
 - [ ] Module 9 — Follow-up CRM
@@ -156,30 +156,57 @@ filter correctly dropped it to zero matches; then seeded the three boundary-case
 (Cash+Unpaid+Dispatched, Credit+Unpaid+Dispatched, Cash+Paid+Dispatched) and confirmed the
 risk card showed exactly the first case and correctly excluded the other two.
 
+## Module 6 detail
+Added `PurchaseReturns`/`PurchaseReturnItems` sheets and a `supplierInvoiceNo` column on
+`Purchases`, plus a `prPrefix` ('PR-') setting. `apiSavePurchaseReturn`/`apiDeletePurchaseReturn`
+mirror `apiSaveSalesReturn`/`apiDeleteSalesReturn` exactly but reversed: each returned line
+subtracts from stock (goods physically leaving our warehouse back to the supplier) instead of
+adding, and the refund is recorded as a synthetic Payments row with `direction: 'Out'` (money we
+conceptually recover from the supplier reduces what we owe them) instead of `'In'`. Same id-sharing
+trick as Sales Return: the Payments row's own `id` equals the return's id, so `paidByRef`
+aggregation and later deletion both work for free without new lookup logic.
+`NewPurchase` gained a `supplierInvoiceNo` field (their bill/invoice number, distinct from our own
+auto-numbered `billNo`) alongside a shortened Notes field to keep the header at 4 columns.
+`PurchaseList` search now also matches `supplierInvoiceNo`, and its bill-view modal shows the
+supplier's invoice number plus a new "↩️ Purchase Return" button (same placement/pattern as
+Invoice view's "↩️ Sales Return"). `NewPurchaseReturn` and `PurchaseReturnsList` are direct
+structural mirrors of `NewSalesReturn`/`SalesReturnsList` — partial-line returns capped at
+(purchased qty − already returned qty) via `derived.returnedQtyByPurchaseItem`, same non-tax-
+prorated straight refund total.
+Verified live in a headless Chromium browser against the mock server: created a purchase with a
+supplier invoice number, confirmed it's searchable/visible in Purchase List and its view modal;
+opened Purchase Return from that modal and returned 6 of 20 units; confirmed stock went 20→14
+(OUT, reversed direction from Sales Return's IN), the supplier's payable balance dropped by exactly
+the ₹480 refund amount, and reopening the return form afterward correctly showed 6 already
+returned / 14 still returnable (the cap holds across repeat visits, not just within one session).
+
 ## Notes
 - Testing method: mock mode only (localStorage mockServer, IS_GAS=false), verified by opening
   Index.html directly in a browser (Playwright/Chromium) — no Google login is available in this
   environment, so live-Sheet testing is the human's job after each module (see bottom of
   ONESHOT_PROMPT1.md for the exact 3 steps).
+- Known pre-existing minor UX nit (not introduced by Module 6, not fixed here): `PartyDetail`'s
+  balance subtitle labels any negative balance "Advance" regardless of party type. For a Supplier,
+  a negative balance means we owe them (payable), not that they've paid in advance — the label
+  should probably read "Payable" for suppliers and "Advance" only for customers. Flagged for a
+  later polish pass rather than fixed now since it touches balance-label wording used everywhere,
+  not just the Purchase Suite.
 
-## STATUS AS OF 2026-07-04 — resume from Module 6
+## STATUS AS OF 2026-07-04 — resume from Module 7
 
-**Fully done, verified, committed:** Modules 0–5 (dark re-theme, keyboard core, CRM depth,
-opening balances, full Quotation→Sales Order→Invoice→Sales Return suite, dispatch tracking +
-cash/credit risk alert). Each was checked by actually running the app in a headless Chromium
-browser against the mock server, not just read for correctness — Module 5's verification worked
-through every boundary case in its own acceptance checklist (Cash+Unpaid+Dispatched shown on the
-risk card, Credit+Unpaid+Dispatched and Cash+Paid+Dispatched both correctly excluded).
+**Fully done, verified, committed:** Modules 0–6 (dark re-theme, keyboard core, CRM depth, opening
+balances, full Quotation→Sales Order→Invoice→Sales Return suite, dispatch tracking + cash/credit
+risk alert, and now the full Purchase Suite with Purchase Return). Each was checked by actually
+running the app in a headless Chromium browser against the mock server, not just read for
+correctness — Module 6's verification covered the full create→search→return→re-cap round trip,
+confirming stock and supplier-balance math both reverse correctly relative to Sales Return.
 
-**Not started: Modules 6–12.** This is the honest state — the remaining modules (Purchase
-Returns, Bulk Payment Entry, Categories/Brands/Stock Ledger, Follow-up CRM, Admin/Roles,
-Reports/Charts, and the final QA pass) are still substantial. Building all of them to the same
-standard (real schema changes, real mock-server parity, real browser verification, no
-placeholders) in one sitting was not realistic without either rushing the quality bar or silently
-stopping partway through a module. Stopping at a clean module boundary, with everything so far
-genuinely finished and tested, was the more honest choice.
+**Not started: Modules 7–12.** Bulk Payment Entry, Categories/Brands/Stock Ledger, Follow-up CRM,
+Admin/Roles, Reports/Charts/Export, and the final QA pass remain. Stopping at a clean module
+boundary, with everything so far genuinely finished and tested, is the honest choice over rushing
+several large modules at once.
 
 **To resume:** open a new session against this same branch/repo, tell Claude "read PROGRESS.md,
-resume from Module 6," and it starts on the Purchase Suite (PurchaseReturns mirroring the Sales
-Return pattern already built in Module 4 — reversed: stock OUT, payable reduced — plus a
-supplierInvoiceNo field and search on Purchases).
+resume from Module 7," and it starts on Bulk Payment Entry (a screen to record one payment against
+multiple open invoices/purchases/opening-balances at once, likely oldest-first auto-allocation with
+manual override, writing one Payments row per allocation).
